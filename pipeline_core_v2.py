@@ -477,7 +477,7 @@ def write_bucketed_matrix(
         for c in (col_label, col_value, col_sources):
             cell = ws.cell(r, c)
             # preserve existing styles where possible; only enforce wrap/top
-            align = cell.alignment.copy(wrapText=True, vertical="top")
+            align = cell.alignment.copy(wrapText=True, vertical="center")
             cell.alignment = align
 
         # 6) Approximate auto-fit row height for Description
@@ -489,7 +489,7 @@ def _style_table(ws, header_row: int, max_col: int):
     header_fill = PatternFill("solid", fgColor="1F4E79")
     header_font = Font(bold=True, color="FFFFFF")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    body_align = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    body_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -534,7 +534,7 @@ def format_ma_sheet(ws):
     _style_table(ws, header_row=1, max_col=6)
 
     for r in range(2, ws.max_row + 1):
-        ws.cell(r, 3).alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+        ws.cell(r, 3).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
 def format_buyers_sheet(ws):
@@ -1740,8 +1740,8 @@ def generate_profile_excel_bytes(
     ws[COMPANY_NAME_CELL].value = company_name
 
     # Ensure Description column (E) has enough width
-    ws.column_dimensions['E'].width = 60
-    ws.column_dimensions['E'].width = 40
+    ws.column_dimensions['E'].width = 70
+    ws.column_dimensions['F'].width = 40
     # Ensure sheets exist and clear table sheets
     ws_comp = ensure_competitors_sheet(wb)
     ws_ma = ensure_ma_sheet(wb)
