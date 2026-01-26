@@ -2,12 +2,25 @@ import streamlit as st
 
 from pipeline_core_v2 import privatecircle_search_dropdown, generate_profile_excel_bytes
 
+import os
+
+def get_secret(key: str):
+    try:
+        return st.secrets[key]        # Streamlit Cloud or local secrets.toml
+    except Exception:
+        return os.getenv(key)         # Local / Codespaces fallback
+
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+PC_API_KEY = get_secret("PC_API_KEY")  # or PRIVATECIRCLE_API_KEY if that’s what you standardise on
+
+if not OPENAI_API_KEY:
+    st.error("OPENAI_API_KEY not set (Streamlit secrets or environment variable).")
+    st.stop()
+
+
 st.set_page_config(page_title="Company Profiler", layout="wide")
 st.title("Company Profiler")
 
-# --- Server-side secrets (Streamlit Cloud -> Settings -> Secrets) ---
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
-PC_API_KEY = st.secrets.get("PC_API_KEY")
 
 # If you’re using auth elsewhere, you can keep these; not used in this minimal file:
 COOKIE_SECRET = st.secrets.get("COOKIE_SECRET")
