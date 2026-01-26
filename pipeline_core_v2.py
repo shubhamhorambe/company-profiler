@@ -168,140 +168,140 @@ Rules:
 Return ONLY valid JSON. No commentary.
 
 OBJECTIVE:
-Identify the WIDEST POSSIBLE SET of companies that could be considered competitors
-to the given company, including direct, indirect, and adjacent competitors.
+Build the most exhaustive competitor universe for the target company, covering:
+- Direct competitors (same product/service + same buyer budget)
+- Indirect/substitute competitors (alternative ways to solve the same job-to-be-done)
+- Adjacent peers (partial overlap, sometimes shortlisted together)
+- Vertical/value-chain overlaps (upstream/downstream players that increasingly bundle/compete)
 
-This is a DISCOVERY task. Prioritise COVERAGE over precision.
-
-CONTEXT (Market Definition):
-{MARKET_DEFINITION_JSON}
-
-INCLUDE companies that:
-- Offer similar or substitutable products/services
-- Serve the same or overlapping customer segments
-- Operate at the same or adjacent value-chain positions
-- Are shortlisted, benchmarked, or compared in industry discussions
-- Compete in specific geographies, tenders, or customer decisions
-
-SCOPE:
-- Include BOTH domestic (India/local) and global players
-- Include specialists, mid-sized firms, and focused divisions of large groups
-- Do NOT exclude companies just because overlap is partial
-
-OUTPUT FORMAT:
+OUTPUT JSON:
 {
-  "competitor_universe": [
+  "direct_competitors": [
     {
       "name": "string",
       "hq": "City, Country/State or Not publicly disclosed",
-      "overlap_type": "direct | partial | adjacent | substitute",
-      "description": "1–2 lines explaining how/where it competes or overlaps",
-      "sources": ["https://credible-source-url"]
+      "competitor_type": "Direct",
+      "overlap_dimension": "Product/Service | Customer segment | Geography | Channel | Value-chain position",
+      "description": "1–2 lines: what they sell + exact overlap vs target",
+      "sources": ["https://..."]
+    }
+  ],
+  "adjacent_peers": [
+    {
+      "name": "string",
+      "hq": "City, Country/State or Not publicly disclosed",
+      "competitor_type": "Indirect/Substitute | Adjacent | Vertical overlap",
+      "overlap_dimension": "Product/Service | Customer segment | Geography | Channel | Value-chain position",
+      "description": "1–2 lines: why they compete/overlap (partial is okay)",
+      "sources": ["https://..."]
     }
   ]
 }
 
-RULES:
-- No guessing. Every company must have at least one credible source.
-- Prefer inclusion over exclusion.
-- If overlap is weak or contextual, still include and label it accordingly.
-- If unsure about fit, include but mark overlap_type = 'adjacent'.
+STRICT RULES:
+- Maximise COVERAGE (India/local + global), but NO guessing.
+- Do NOT include the target company itself.
+- Do NOT include customers as competitors.
+- Large conglomerates allowed ONLY if the competing business/division is identifiable.
+- Each entry MUST have >=1 credible http(s) source URL.
+- Do NOT invent URLs; use only URLs supported by evidence provided to you.
+- If you cannot find a credible source, EXCLUDE that entry.
+- If unsure whether direct or adjacent, put in adjacent_peers.
+TARGET COUNTS (if available): Direct 8–20, Adjacent 8–25.
 """.strip(),
 
-"ma_landscape": """
+"m&a landscape": """
 Return ONLY valid JSON. No commentary.
 
 OBJECTIVE:
-Identify the BROADEST POSSIBLE SET of historical M&A transactions
-that are relevant to the company's market and adjacent markets.
+Create an evidence-driven M&A landscape for the target's industry and adjacent industries, including:
+- Horizontal consolidation deals (competitor buys competitor)
+- Capability acquisitions (tech/product/engineering/design)
+- Geographic expansion deals
+- Vertical integration deals (upstream/downstream)
+- PE platform creation + bolt-on rollups
+- Strategic minority investments / JVs if common in the sector
 
-This is a DISCOVERY task. Prioritise COVERAGE over precision.
-
-CONTEXT (Market Definition):
-{MARKET_DEFINITION_JSON}
-
-INCLUDE transactions that:
-- Involve companies operating in the same or adjacent markets
-- Include horizontal, vertical, or adjacency-driven acquisitions
-- Are often referenced for benchmarking or valuation context
-- Occurred within the last 7–10 years (if data available)
-
-SCOPE:
-- Domestic (India/local) AND global transactions
-- Majority stakes, full acquisitions, and strategic minority investments
-- PE-backed platform acquisitions and bolt-ons
-
-OUTPUT FORMAT:
+OUTPUT JSON:
 {
-  "transactions": [
+  "deals": [
     {
       "acquirer": "string",
       "target": "string",
       "year": "YYYY or Not disclosed",
-      "deal_type": "majority | minority | platform | bolt-on | strategic",
-      "deal_rationale": "1–2 lines explaining strategic fit",
-      "sources": ["https://credible-source-url"]
+      "deal_type": "Majority | Minority | Platform | Bolt-on | Strategic investment | JV",
+      "deal_value": "string or Value not disclosed",
+      "rationale": "1–2 lines: why this deal happened + relevance to the market",
+      "source": "https://..."
     }
-  ]
+  ],
+  "most_acquisitive_buyers": [
+    {
+      "name": "string",
+      "pattern": "1 line: roll-up/platform/bolt-on strategy with evidence",
+      "source": "https://..."
+    }
+  ],
+  "activity_trend": {
+    "summary": "2–4 lines: deal activity trend (deal-count/value proxy) and what it implies",
+    "sources": ["https://...", "https://..."]
+  }
 }
 
-RULES:
-- Prefer inclusion over exclusion
-- If relevance is partial or adjacency-driven, still include it
-- No guessing — every deal must have at least one credible source
+STRICT RULES:
+- Maximise COVERAGE (India/local + global), preferably last 7–10 years if available.
+- Only include deals that clearly relate to the same or adjacent market.
+- Do NOT include deals where acquirer or target is the target company itself unless explicitly evidenced as a real transaction.
+- Every deal/buyer MUST have >=1 credible http(s) source.
+- Do NOT invent URLs; use only URLs supported by evidence provided to you.
+- If value/year not disclosed, keep the deal but explicitly mark as Not disclosed / Value not disclosed (still with source).
+- Aim 15–40 deals if available; else return as many as evidenced.
 """.strip(),
 
-"potential_buyers": """
+
+"prospective buyers": """
 Return ONLY valid JSON. No commentary.
 
 OBJECTIVE:
-Identify the WIDEST POSSIBLE SET of potential acquirers
-for the company, including strategic buyers and financial sponsors.
+Identify the broadest realistic buyer universe for the target company, across:
+- Strategic buyers (same market)
+- Competitors as buyers (horizontal consolidation)
+- Adjacent strategics (capability/segment adjacency)
+- Vertical integrators (upstream/downstream integration)
+- Financial buyers (PE/Infra/Family office) and PE-backed platforms with acquisition appetite
+- Global + domestic buyers
 
-This is a DISCOVERY task. Prioritise COVERAGE over selectivity.
+A buyer is "realistic" if there is EVIDENCE of at least one:
+(1) Prior acquisitions in the same/adjacent space,
+(2) Ownership/portfolio in the space,
+(3) Stated inorganic growth intent,
+(4) Clear strategic adjacency (capability/geography/customer access) supported by sources.
 
-CONTEXT (Market Definition):
-{MARKET_DEFINITION_JSON}
-
-INCLUDE buyers that:
-- Operate in the same or adjacent markets
-- Have made acquisitions in similar sectors historically
-- Could benefit from scale, capability, geography, or vertical integration
-- Actively pursue platform or bolt-on acquisitions
-
-SCOPE:
-- Strategic buyers: domestic and global corporates
-- Financial buyers: PE funds, PE-backed platforms, family offices
-- Include buyers even if fit is partial or thesis-driven
-
-OUTPUT FORMAT:
+OUTPUT JSON:
 {
-  "strategic_buyers": [
+  "buyers": [
     {
-      "name": "string",
+      "buyer": "string",
+      "category": "Strategic | Competitor | Adjacent Strategic | Vertical Integrator | PE/Infra Platform | Family Office",
       "hq": "City, Country/State or Not disclosed",
-      "buyer_type": "strategic",
-      "rationale": "1–2 lines explaining acquisition logic",
-      "sources": ["https://credible-source-url"]
-    }
-  ],
-  "financial_buyers": [
-    {
-      "name": "string",
-      "hq": "City, Country/State or Not disclosed",
-      "buyer_type": "financial",
-      "rationale": "1–2 lines explaining investment thesis or precedent",
-      "sources": ["https://credible-source-url"]
+      "rationale": "1–2 lines: specific buyer logic (market/capability/geography/vertical integration/roll-up)",
+      "frictions": "1 line: key risk (antitrust/overlap/integration/regulatory) or Not material",
+      "prior_acquisitions": "1 line: 0–2 precedent examples if available; else Not disclosed",
+      "source": "https://..."
     }
   ]
 }
 
-RULES:
-- Prefer inclusion over exclusion
-- Do NOT limit to 'obvious' buyers
-- If rationale is adjacency or portfolio-driven, include it
-- No guessing — every buyer must have at least one credible source
+STRICT RULES:
+- Maximise COVERAGE (India/local + global), but NO guessing.
+- Do NOT include the target company itself.
+- Do NOT include entities only because they are large/famous; must have evidence.
+- Each buyer MUST have >=1 credible http(s) source URL.
+- Do NOT invent URLs; use only URLs supported by evidence provided to you.
+- If you cannot find a credible source, EXCLUDE that buyer.
+- Minimum 15 buyers if the market supports it; aim 25–60 if available.
 """.strip(),
+
 }
 
 DEFAULT_ROW_PROMPT = """
