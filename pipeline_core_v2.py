@@ -164,45 +164,143 @@ Rules:
 - Neutral tone
 """.strip(),
 
-    "competitors": """
-Return ONLY JSON:
+"competitors": """
+Return ONLY valid JSON. No commentary.
 
+OBJECTIVE:
+Identify the WIDEST POSSIBLE SET of companies that could be considered competitors
+to the given company, including direct, indirect, and adjacent competitors.
+
+This is a DISCOVERY task. Prioritise COVERAGE over precision.
+
+CONTEXT (Market Definition):
+{MARKET_DEFINITION_JSON}
+
+INCLUDE companies that:
+- Offer similar or substitutable products/services
+- Serve the same or overlapping customer segments
+- Operate at the same or adjacent value-chain positions
+- Are shortlisted, benchmarked, or compared in industry discussions
+- Compete in specific geographies, tenders, or customer decisions
+
+SCOPE:
+- Include BOTH domestic (India/local) and global players
+- Include specialists, mid-sized firms, and focused divisions of large groups
+- Do NOT exclude companies just because overlap is partial
+
+OUTPUT FORMAT:
 {
-  "direct_competitors": [
+  "competitor_universe": [
     {
       "name": "string",
-      "hq": "string (City, Country/State) or Not publicly disclosed",
-      "description": "1–2 lines: core offering + why it competes directly with the company",
-      "sources": ["https://..."]
-    }
-  ],
-  "adjacent_peers": [
-    {
-      "name": "string",
-      "hq": "string or Not publicly disclosed",
-      "description": "1–2 lines: partial overlap, substitute, or ecosystem role",
-      "sources": ["https://..."]
+      "hq": "City, Country/State or Not publicly disclosed",
+      "overlap_type": "direct | partial | adjacent | substitute",
+      "description": "1–2 lines explaining how/where it competes or overlaps",
+      "sources": ["https://credible-source-url"]
     }
   ]
 }
 
-Rules:
-- Domestic + global where relevant
-- Every entry must have >=1 credible source URL
-- No guessing
+RULES:
+- No guessing. Every company must have at least one credible source.
+- Prefer inclusion over exclusion.
+- If overlap is weak or contextual, still include and label it accordingly.
+- If unsure about fit, include but mark overlap_type = 'adjacent'.
 """.strip(),
 
-    "m&a landscape": """
-M&A landscape in the industry (last 5 years, evidence-driven).
+"ma_landscape": """
+Return ONLY valid JSON. No commentary.
 
-Return structured deal list:
-- Acquirer → Target (Year) — value if disclosed — rationale — source URL
+OBJECTIVE:
+Identify the BROADEST POSSIBLE SET of historical M&A transactions
+that are relevant to the company's market and adjacent markets.
+
+This is a DISCOVERY task. Prioritise COVERAGE over precision.
+
+CONTEXT (Market Definition):
+{MARKET_DEFINITION_JSON}
+
+INCLUDE transactions that:
+- Involve companies operating in the same or adjacent markets
+- Include horizontal, vertical, or adjacency-driven acquisitions
+- Are often referenced for benchmarking or valuation context
+- Occurred within the last 7–10 years (if data available)
+
+SCOPE:
+- Domestic (India/local) AND global transactions
+- Majority stakes, full acquisitions, and strategic minority investments
+- PE-backed platform acquisitions and bolt-ons
+
+OUTPUT FORMAT:
+{
+  "transactions": [
+    {
+      "acquirer": "string",
+      "target": "string",
+      "year": "YYYY or Not disclosed",
+      "deal_type": "majority | minority | platform | bolt-on | strategic",
+      "deal_rationale": "1–2 lines explaining strategic fit",
+      "sources": ["https://credible-source-url"]
+    }
+  ]
+}
+
+RULES:
+- Prefer inclusion over exclusion
+- If relevance is partial or adjacency-driven, still include it
+- No guessing — every deal must have at least one credible source
 """.strip(),
 
-    "prospective buyers": """
-Identify realistic potential buyers for the target.
+"potential_buyers": """
+Return ONLY valid JSON. No commentary.
 
-Return buyer universe with evidence links; no guessing.
+OBJECTIVE:
+Identify the WIDEST POSSIBLE SET of potential acquirers
+for the company, including strategic buyers and financial sponsors.
+
+This is a DISCOVERY task. Prioritise COVERAGE over selectivity.
+
+CONTEXT (Market Definition):
+{MARKET_DEFINITION_JSON}
+
+INCLUDE buyers that:
+- Operate in the same or adjacent markets
+- Have made acquisitions in similar sectors historically
+- Could benefit from scale, capability, geography, or vertical integration
+- Actively pursue platform or bolt-on acquisitions
+
+SCOPE:
+- Strategic buyers: domestic and global corporates
+- Financial buyers: PE funds, PE-backed platforms, family offices
+- Include buyers even if fit is partial or thesis-driven
+
+OUTPUT FORMAT:
+{
+  "strategic_buyers": [
+    {
+      "name": "string",
+      "hq": "City, Country/State or Not disclosed",
+      "buyer_type": "strategic",
+      "rationale": "1–2 lines explaining acquisition logic",
+      "sources": ["https://credible-source-url"]
+    }
+  ],
+  "financial_buyers": [
+    {
+      "name": "string",
+      "hq": "City, Country/State or Not disclosed",
+      "buyer_type": "financial",
+      "rationale": "1–2 lines explaining investment thesis or precedent",
+      "sources": ["https://credible-source-url"]
+    }
+  ]
+}
+
+RULES:
+- Prefer inclusion over exclusion
+- Do NOT limit to 'obvious' buyers
+- If rationale is adjacency or portfolio-driven, include it
+- No guessing — every buyer must have at least one credible source
 """.strip(),
 }
 
