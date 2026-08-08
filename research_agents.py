@@ -191,14 +191,12 @@ class ResearchOrchestrator:
             "tool_choice": "auto",
             "max_tool_calls": 12,
             "max_output_tokens": max_output_tokens,
-            "text": {"format": {"type": "json_object"}},
         }
         try:
             response = self.client.responses.create(**request)
         except TypeError:
-            # Compatibility for older SDK versions. JSON is still enforced in
-            # the prompt and parsed defensively below.
-            request.pop("text", None)
+            # Compatibility for older SDK versions. JSON is enforced in the
+            # prompt and parsed defensively below.
             request.pop("max_tool_calls", None)
             response = self.client.responses.create(**request)
         return _extract_json_object(response.output_text or "")

@@ -54,6 +54,18 @@ class WorkbookPipelineTests(unittest.TestCase):
         self.assertNotIn("temperature", client.responses.kwargs)
         self.assertEqual(client.responses.kwargs["text"]["format"]["type"], "json_object")
 
+    def test_web_search_omits_incompatible_json_mode(self):
+        client = _FakeClient()
+        _responses_create(
+            client,
+            model="gpt-5.6-terra",
+            input="Return JSON using web evidence.",
+            tools=[{"type": "web_search"}],
+            response_format={"type": "json_object"},
+        )
+        self.assertNotIn("text", client.responses.kwargs)
+        self.assertEqual(client.responses.kwargs["tools"], [{"type": "web_search"}])
+
     def test_rewrite_cannot_introduce_a_source_not_in_the_evidence_set(self):
         client = _QueuedClient(
             [

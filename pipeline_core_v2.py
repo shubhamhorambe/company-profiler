@@ -1704,9 +1704,18 @@ def _responses_create(client: OpenAI, **kwargs):
     """
     Normalize older ``response_format`` calls to the Responses API ``text``
     format and remove parameters unsupported by current reasoning models.
+
+    The Responses API rejects JSON mode when the built-in web-search tool is
+    enabled. Those requests already require JSON in their prompts and are
+    parsed defensively, so omit the incompatible format parameter there.
     """
     response_format = kwargs.pop("response_format", None)
-    if response_format and "text" not in kwargs:
+    tools = kwargs.get("tools") or []
+    has_web_search = any(
+        isinstance(tool, dict) and str(tool.get("type", "")).startswith("web_search")
+        for tool in tools
+    )
+    if response_format and "text" not in kwargs and not has_web_search:
         kwargs["text"] = {"format": response_format}
 
     model = str(kwargs.get("model", ""))

@@ -31,6 +31,20 @@ class _PlanningOrchestrator(ResearchOrchestrator):
         }
 
 
+class _CapturingResponses:
+    def __init__(self):
+        self.kwargs = None
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        return type("Response", (), {"output_text": "{}"})()
+
+
+class _CapturingClient:
+    def __init__(self):
+        self.responses = _CapturingResponses()
+
+
 class ResearchAgentCleaningTests(unittest.TestCase):
     def test_normalize_url_rejects_unsafe_schemes_and_local_hosts(self):
         self.assertEqual(normalize_url("javascript:alert(1)"), "")
@@ -89,6 +103,17 @@ class ResearchAgentCleaningTests(unittest.TestCase):
         )
         self.assertEqual(len(queries), 3)
         self.assertIn("fall protection", queries[1])
+
+    def test_web_research_request_does_not_combine_search_with_json_mode(self):
+        orchestrator = ResearchOrchestrator.__new__(ResearchOrchestrator)
+        orchestrator.client = _CapturingClient()
+        orchestrator.model = "gpt-5.6-terra"
+        orchestrator._web_json("Return only JSON.")
+        self.assertNotIn("text", orchestrator.client.responses.kwargs)
+        self.assertEqual(
+            orchestrator.client.responses.kwargs["tools"],
+            [{"type": "web_search"}],
+        )
 
 
 if __name__ == "__main__":
