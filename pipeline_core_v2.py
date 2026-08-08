@@ -15,9 +15,13 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 import requests
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openai import OpenAI
+
+from mergermarket_import import MergermarketImport, parse_mergermarket_export
+from research_agents import ResearchOrchestrator
 
 
 # ---------------------------
@@ -31,6 +35,16 @@ MA_SHEET = "M&A Landscape"
 BUYERS_SHEET = "Prospective Buyers"
 COMPETITORS_SHEET = "Competitors"
 FINANCIALS_SHEET = "Financials"
+CREDIT_RATING_SHEET = "Credit Rating"
+SOURCE_DOSSIER_SHEET = "Source Dossier"
+MM_RAW_SHEET = "MM Raw Export"
+FINAL_COMPS_SHEET = "Final Comps"
+ADJACENT_COMPS_SHEET = "Adjacent"
+EXCLUDED_COMPS_SHEET = "Excluded"
+COMPS_SOURCES_SHEET = "Sources"
+COMPS_SEARCH_LOG_SHEET = "Search Log"
+COMPS_QA_SHEET = "QA"
+EVIDENCE_REGISTER_SHEET = "Evidence Register"
 
 START_ROW = 5
 
@@ -51,8 +65,8 @@ COMP_COL_SOURCES = 6
 
 PRIVATECIRCLE_BASE_URL = "https://privatecircle.co"
 
-RESEARCH_MODEL = "gpt-4o"
-REWRITE_MODEL = "gpt-4o-mini"
+RESEARCH_MODEL = os.getenv("OPENAI_RESEARCH_MODEL", "gpt-5.6-terra")
+REWRITE_MODEL = os.getenv("OPENAI_REWRITE_MODEL", "gpt-5.6-luna")
 
 MAX_DESC_CHARS = 2200
 MAX_SOURCES_CHARS = 1500
@@ -647,6 +661,22 @@ def format_buyers_sheet(ws):
     _style_table(ws, header_row=1, max_col=7)
 
 
+def format_credit_rating_sheet(ws):
+    ws.freeze_panes = "A2"
+    widths = [18, 15, 18, 22, 18, 28, 18, 55, 48, 48, 55]
+    for index, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = width
+    _style_table(ws, header_row=1, max_col=len(widths))
+
+
+def format_source_dossier_sheet(ws):
+    ws.freeze_panes = "A2"
+    widths = [22, 24, 48, 16, 65, 55]
+    for index, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = width
+    _style_table(ws, header_row=1, max_col=len(widths))
+
+
 # ---------------------------
 # ENSURE / CLEAR SHEETS
 # ---------------------------
@@ -682,6 +712,354 @@ def ensure_financials_sheet(wb: openpyxl.Workbook):
     if ws.max_row > 1:
         ws.delete_rows(1, ws.max_row)
     return ws
+
+
+def ensure_credit_rating_sheet(wb: openpyxl.Workbook):
+    ws = wb[CREDIT_RATING_SHEET] if CREDIT_RATING_SHEET in wb.sheetnames else wb.create_sheet(CREDIT_RATING_SHEET)
+    headers = [
+        "Agency",
+        "Report Date",
+        "Rating Action",
+        "Rating",
+        "Outlook",
+        "Instrument",
+        "Amount",
+        "Rationale",
+        "Key Strengths",
+        "Key Risks",
+        "Official Report URL",
+    ]
+    if ws.max_row < 1 or ws.cell(1, 1).value is None:
+        for c, h in enumerate(headers, start=1):
+            ws.cell(1, c).value = h
+    return ws
+
+
+def ensure_source_dossier_sheet(wb: openpyxl.Workbook):
+    ws = wb[SOURCE_DOSSIER_SHEET] if SOURCE_DOSSIER_SHEET in wb.sheetnames else wb.create_sheet(SOURCE_DOSSIER_SHEET)
+    headers = ["Source Type", "Publisher", "Title", "Published Date", "URL", "Notes"]
+    if ws.max_row < 1 or ws.cell(1, 1).value is None:
+        for c, h in enumerate(headers, start=1):
+            ws.cell(1, c).value = h
+    return ws
+
+
+def write_source_dossier(ws, dossier: Dict[str, Any]):
+    row = ws.max_row + 1
+    official_website = dossier.get("official_website")
+    if official_website:
+        ws.cell(row, 1).value = "official_website"
+        ws.cell(row, 2).value = dossier.get("legal_name") or "Company"
+        ws.cell(row, 3).value = "Official company website"
+        ws.cell(row, 4).value = "Not disclosed"
+        ws.cell(row, 5).value = official_website
+        ws.cell(row, 6).value = dossier.get("identity_notes") or "Identity-matched official website"
+        row += 1
+
+    seen = {official_website} if official_website else set()
+    for source in dossier.get("sources", []):
+        if not isinstance(source, dict) or source.get("url") in seen:
+            continue
+        seen.add(source.get("url"))
+        ws.cell(row, 1).value = source.get("source_type")
+        ws.cell(row, 2).value = source.get("publisher")
+        ws.cell(row, 3).value = source.get("title")
+        ws.cell(row, 4).value = source.get("published_date")
+        ws.cell(row, 5).value = source.get("url")
+        ws.cell(row, 6).value = source.get("notes")
+        row += 1
+
+
+def write_credit_reports(ws, reports: List[Dict[str, str]]):
+    row = ws.max_row + 1
+    fields = [
+        "agency",
+        "report_date",
+        "rating_action",
+        "rating",
+        "outlook",
+        "instrument",
+        "amount",
+        "rationale",
+        "key_strengths",
+        "key_risks",
+        "report_url",
+    ]
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        for column, field in enumerate(fields, start=1):
+            ws.cell(row, column).value = report.get(field)
+        row += 1
+
+
+COMPS_HEADERS = [
+    "Announced Date",
+    "Target",
+    "Acquirer",
+    "Deal Value (USD mn)",
+    "Deal %",
+    "Seller",
+    "EV/EBITDA",
+    "Mergermarket Deal ID",
+    "Relevance Tier",
+    "Relevance Rationale",
+    "Transaction Type",
+    "Status",
+    "Original Deal Value",
+    "Currency",
+    "Enterprise Value (USD mn)",
+    "Revenue (USD mn)",
+    "EBITDA (USD mn)",
+    "EV/Revenue",
+    "Multiple Status",
+    "Mergermarket Profile",
+    "Description",
+    "Target Sector",
+    "Target Geography",
+]
+
+
+def _fresh_sheet(wb: openpyxl.Workbook, name: str):
+    if name in wb.sheetnames:
+        index = wb.sheetnames.index(name)
+        wb.remove(wb[name])
+        return wb.create_sheet(name, index)
+    return wb.create_sheet(name)
+
+
+def _safe_excel_value(value: Any):
+    if isinstance(value, str):
+        return f"'{value}" if value.startswith(("=", "+", "@")) else value
+    if isinstance(value, (int, float, bool, time.struct_time)) or value is None:
+        return value
+    if hasattr(value, "isoformat"):
+        return value
+    return str(value)
+
+
+def _format_comps_table(ws):
+    header_fill = PatternFill("solid", fgColor="17365D")
+    header_font = Font(bold=True, color="FFFFFF")
+    header_border = Border(bottom=Side(style="medium", color="17365D"))
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = header_border
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.freeze_panes = "D2"
+    ws.sheet_view.showGridLines = False
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{max(ws.max_row, 1)}"
+    widths = {
+        "A": 14, "B": 28, "C": 28, "D": 18, "E": 12, "F": 24, "G": 14,
+        "H": 20, "I": 14, "J": 48, "K": 20, "L": 16, "M": 20, "N": 11,
+        "O": 20, "P": 18, "Q": 18, "R": 14, "S": 17, "T": 48, "U": 70,
+        "V": 28, "W": 22,
+    }
+    for column, width in widths.items():
+        ws.column_dimensions[column].width = width
+    for row in range(2, ws.max_row + 1):
+        ws.cell(row, 1).number_format = "yyyy-mm-dd"
+        for column in (4, 13, 15, 16, 17):
+            ws.cell(row, column).number_format = '$#,##0.0;[Red]($#,##0.0);-'
+            ws.cell(row, column).alignment = Alignment(horizontal="right", vertical="top")
+        ws.cell(row, 5).number_format = "0.0%;[Red](0.0%);-"
+        for column in (7, 18):
+            ws.cell(row, column).number_format = "0.0x;[Red](0.0x);-"
+        for column in range(1, ws.max_column + 1):
+            if column not in {4, 5, 7, 13, 15, 16, 17, 18}:
+                ws.cell(row, column).alignment = Alignment(vertical="top", wrap_text=True)
+        if ws.cell(row, 20).value:
+            ws.cell(row, 20).font = Font(color="FF0000", underline="single")
+        tier = str(ws.cell(row, 9).value or "")
+        tier_fill = {
+            "Core": "C6EFCE",
+            "Broader": "DDEBF7",
+            "Adjacent": "FFF2CC",
+            "Excluded": "F4CCCC",
+            "Unscreened": "FCE4D6",
+        }.get(tier)
+        if tier_fill:
+            ws.cell(row, 9).fill = PatternFill("solid", fgColor=tier_fill)
+            ws.cell(row, 9).font = Font(bold=True)
+        long_text = max(len(str(ws.cell(row, 10).value or "")), len(str(ws.cell(row, 21).value or "")))
+        ws.row_dimensions[row].height = min(90, max(18, 15 * math.ceil(long_text / 70)))
+
+
+def _append_comp_row(ws, deal: Dict[str, Any]):
+    row = ws.max_row + 1
+    explicit_ev_ebitda = deal.get("ev_ebitda_reported")
+    explicit_ev_revenue = deal.get("ev_revenue_reported")
+    values = [
+        deal.get("announced_date"),
+        deal.get("target"),
+        deal.get("acquirer") or "Not disclosed",
+        deal.get("deal_value_usd_mn"),
+        deal.get("deal_percent"),
+        deal.get("seller") or "Not disclosed",
+        explicit_ev_ebitda,
+        deal.get("deal_id") or "Not disclosed",
+        deal.get("relevance_tier") or "Unscreened",
+        deal.get("relevance_rationale") or "Screening was not completed",
+        deal.get("deal_type") or "Not disclosed",
+        deal.get("deal_status") or "Not disclosed",
+        deal.get("deal_value_original") or deal.get("deal_value_original_text"),
+        deal.get("currency") or "Not disclosed",
+        deal.get("enterprise_value_usd_mn"),
+        deal.get("revenue_usd_mn"),
+        deal.get("ebitda_usd_mn"),
+        explicit_ev_revenue,
+        "Reported" if explicit_ev_ebitda is not None else "Not computable",
+        deal.get("profile_url"),
+        deal.get("description"),
+        deal.get("target_sector"),
+        deal.get("target_geography"),
+    ]
+    for column, value in enumerate(values, start=1):
+        ws.cell(row, column).value = _safe_excel_value(value)
+    if explicit_ev_ebitda is None and deal.get("enterprise_value_usd_mn") is not None and deal.get("ebitda_usd_mn") not in (None, 0):
+        ws.cell(row, 7).value = f'=IFERROR(O{row}/Q{row},"")'
+        ws.cell(row, 19).value = "Calculated"
+    if explicit_ev_revenue is None and deal.get("enterprise_value_usd_mn") is not None and deal.get("revenue_usd_mn") not in (None, 0):
+        ws.cell(row, 18).value = f'=IFERROR(O{row}/P{row},"")'
+
+
+def write_transaction_comps_workbook(
+    wb: openpyxl.Workbook,
+    imported: MergermarketImport,
+    company_name: str,
+    search_scope: str,
+):
+    raw = _fresh_sheet(wb, MM_RAW_SHEET)
+    for column, header in enumerate(imported.headers, start=1):
+        raw.cell(1, column).value = header
+    for row_index, raw_row in enumerate(imported.raw_rows, start=2):
+        for column, value in enumerate(raw_row, start=1):
+            raw.cell(row_index, column).value = _safe_excel_value(value)
+    raw.freeze_panes = "A2"
+    raw.sheet_view.showGridLines = False
+    raw.auto_filter.ref = f"A1:{get_column_letter(max(raw.max_column, 1))}{max(raw.max_row, 1)}"
+    for cell in raw[1]:
+        cell.fill = PatternFill("solid", fgColor="595959")
+        cell.font = Font(bold=True, color="FFFFFF")
+    for column in range(1, raw.max_column + 1):
+        raw.column_dimensions[get_column_letter(column)].width = 22
+
+    final_ws = _fresh_sheet(wb, FINAL_COMPS_SHEET)
+    adjacent_ws = _fresh_sheet(wb, ADJACENT_COMPS_SHEET)
+    excluded_ws = _fresh_sheet(wb, EXCLUDED_COMPS_SHEET)
+    for ws in (final_ws, adjacent_ws, excluded_ws):
+        for column, header in enumerate(COMPS_HEADERS, start=1):
+            ws.cell(1, column).value = header
+
+    for deal in imported.deals:
+        tier = deal.get("relevance_tier")
+        if tier in {"Core", "Broader"}:
+            destination = final_ws
+        elif tier == "Adjacent":
+            destination = adjacent_ws
+        else:
+            destination = excluded_ws
+        _append_comp_row(destination, deal)
+
+    for ws in (final_ws, adjacent_ws, excluded_ws):
+        _format_comps_table(ws)
+
+    sources = _fresh_sheet(wb, COMPS_SOURCES_SHEET)
+    source_headers = ["Mergermarket Deal ID", "Target", "Field", "Source Class", "URL", "Access Notes"]
+    for column, header in enumerate(source_headers, start=1):
+        sources.cell(1, column).value = header
+    source_row = 2
+    for deal in imported.deals:
+        if not deal.get("profile_url"):
+            continue
+        values = [deal.get("deal_id"), deal.get("target"), "Seed transaction record", "Mergermarket", deal.get("profile_url"), "Imported from authorised export"]
+        for column, value in enumerate(values, start=1):
+            sources.cell(source_row, column).value = value
+        sources.cell(source_row, 5).font = Font(color="FF0000", underline="single")
+        source_row += 1
+    format_source_dossier_sheet(sources)
+
+    search_log = _fresh_sheet(wb, COMPS_SEARCH_LOG_SHEET)
+    search_headers = ["Date", "Subject Company", "Search / Source", "Scope", "Result", "Unresolved / Next Step"]
+    for column, header in enumerate(search_headers, start=1):
+        search_log.cell(1, column).value = header
+    search_log.append([
+        time.strftime("%Y-%m-%d"),
+        company_name,
+        f"Authorised Mergermarket export: {imported.source_sheet}",
+        search_scope,
+        f"{len(imported.deals)} unique candidate transactions imported",
+        "Run public-source enrichment for missing values and financial denominators",
+    ])
+    for warning in imported.warnings:
+        search_log.append([time.strftime("%Y-%m-%d"), company_name, "Import QA", search_scope, warning, "Review source export layout if material"])
+    _style_table(search_log, header_row=1, max_col=6)
+    for column, width in enumerate([14, 28, 48, 28, 45, 55], start=1):
+        search_log.column_dimensions[get_column_letter(column)].width = width
+
+    qa = _fresh_sheet(wb, COMPS_QA_SHEET)
+    qa.append(["Check", "Result", "Status", "Notes"])
+    qa.append(["Unique imported transactions", len(imported.deals), "OK" if imported.deals else "FAIL", "After Deal ID and composite-key deduplication"])
+    qa.append(["Core + Broader transactions", max(final_ws.max_row - 1, 0), "OK" if final_ws.max_row > 1 else "REVIEW", "Final Comps population"])
+    qa.append(["Adjacent transactions", max(adjacent_ws.max_row - 1, 0), "OK", "Context-only transactions"])
+    qa.append(["Excluded / unscreened transactions", max(excluded_ws.max_row - 1, 0), "REVIEW" if excluded_ws.max_row > 1 else "OK", "Review all unscreened records"])
+    missing_dates = sum(1 for deal in imported.deals if not deal.get("announced_date"))
+    missing_values = sum(1 for deal in imported.deals if deal.get("deal_value_usd_mn") is None)
+    qa.append(["Missing announced dates", missing_dates, "OK" if missing_dates == 0 else "REVIEW", "Research missing dates before final use"])
+    qa.append(["Missing USD deal values", missing_values, "OK" if missing_values == 0 else "REVIEW", "Do not treat funding amount as total deal value"])
+    qa.append(["Coverage saturation", "Not run", "OPEN", "Requires two public-source gap passes with no additional relevant deal"])
+    _style_table(qa, header_row=1, max_col=4)
+    qa.column_dimensions["A"].width = 34
+    qa.column_dimensions["B"].width = 22
+    qa.column_dimensions["C"].width = 14
+    qa.column_dimensions["D"].width = 65
+    for row in range(2, qa.max_row + 1):
+        status = str(qa.cell(row, 3).value or "")
+        fill = {
+            "OK": "C6EFCE",
+            "REVIEW": "FFF2CC",
+            "OPEN": "FCE4D6",
+            "FAIL": "F4CCCC",
+        }.get(status)
+        if fill:
+            qa.cell(row, 3).fill = PatternFill("solid", fgColor=fill)
+            qa.cell(row, 3).font = Font(bold=True)
+
+
+def write_evidence_register(
+    wb: openpyxl.Workbook,
+    facts_cache: Dict[Tuple[str, str], List[Dict[str, Any]]],
+):
+    ws = _fresh_sheet(wb, EVIDENCE_REGISTER_SHEET)
+    headers = ["Topic", "Claim", "Evidence Quality", "Source URL"]
+    for column, header in enumerate(headers, start=1):
+        ws.cell(1, column).value = header
+    seen = set()
+    row = 2
+    quality_order = {"regulator": 0, "official": 1, "industry_report": 2, "news": 3, "database": 4, "other": 5}
+    records = []
+    for (_, topic), facts in facts_cache.items():
+        for fact in facts:
+            key = (topic, fact.get("claim"), fact.get("evidence_url"))
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append((topic, fact))
+    records.sort(key=lambda item: (item[0], quality_order.get(item[1].get("evidence_quality"), 9)))
+    for topic, fact in records:
+        ws.cell(row, 1).value = topic
+        ws.cell(row, 2).value = fact.get("claim")
+        ws.cell(row, 3).value = fact.get("evidence_quality") or "other"
+        ws.cell(row, 4).value = fact.get("evidence_url")
+        ws.cell(row, 4).font = Font(color="FF0000", underline="single")
+        row += 1
+    _style_table(ws, header_row=1, max_col=4)
+    ws.freeze_panes = "A2"
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 90
+    ws.column_dimensions["C"].width = 20
+    ws.column_dimensions["D"].width = 65
 
 
 def clear_table_sheet_keep_header(ws):
@@ -742,15 +1120,33 @@ def pc_get(path: str, token: str, params: Optional[Dict[str, Any]] = None, retri
     for attempt in range(retries + 1):
         try:
             r = requests.get(url, headers=_pc_headers(token), params=params, timeout=30)
-            if r.status_code == 429:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            if r.status_code >= 400:
-                raise RuntimeError(f"PrivateCircle HTTP {r.status_code}: {r.text[:800]}")
-            return r.json()
-        except Exception as e:
-            last_err = e
+        except requests.RequestException as exc:
+            last_err = exc
+            if attempt >= retries:
+                break
             time.sleep(0.6 * (attempt + 1))
+            continue
+
+        if r.status_code == 429 or r.status_code >= 500:
+            last_err = RuntimeError(f"PrivateCircle HTTP {r.status_code}: {r.text[:800]}")
+            if attempt >= retries:
+                break
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        if r.status_code >= 400:
+            # Authentication, permission, and bad-request errors are not transient.
+            raise RuntimeError(f"PrivateCircle HTTP {r.status_code}: {r.text[:800]}")
+        try:
+            payload = r.json()
+        except ValueError as exc:
+            last_err = RuntimeError(f"PrivateCircle returned invalid JSON: {exc}")
+            if attempt >= retries:
+                break
+            time.sleep(0.6 * (attempt + 1))
+            continue
+        if not isinstance(payload, dict):
+            raise RuntimeError("PrivateCircle returned an unexpected non-object response.")
+        return payload
     raise RuntimeError(f"PrivateCircle request failed: {last_err}")
 
 
@@ -765,337 +1161,523 @@ def pc_get_company_endpoint(encrypted_id: str, suffix: str, token: str, params: 
 
 
 # ---------------------------
-# Financials (PrivateCircle) — your logic preserved
+# Financials (PrivateCircle)
 # ---------------------------
-def to_inr_mn(value):
+def _pc_number(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().lower()
+    if text in {"", "na", "n/a", "nm", "none", "null", "-"}:
+        return None
     try:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return round(value / 1_000_000, 2)
-        v = float(str(value).replace(",", ""))
-        return round(v / 1_000_000, 2)
-    except Exception:
+        return float(text.replace(",", ""))
+    except (TypeError, ValueError):
         return None
 
 
-def pull_financial_statements(encrypted_id: str, token: str, no_of_years: int = 5, xbrl_type_tag: str = "consolidated") -> Dict[str, Any]:
-    ov = pc_get_company_endpoint(encrypted_id, "overview", token)
-
-    inc = pc_get_company_endpoint(
-        encrypted_id,
-        "income-statement",
-        token,
-        params={
-            "no_of_years": no_of_years,
-            "source": "mca",
-            "type": "detailed",
-            "xbrl_type_tag": xbrl_type_tag,
-            "field_list": [
-                "fiscal_year",
-                "revenue_from_operations",
-                "total_revenue",
-                "total_sales_wo_other_income",
-                "other_income",
-                "total_export_sales",
-                "export_goods_manf_sales",
-                "export_goods_traded_sales",
-                "export_services_sales",
-                "gross_profit",
-                "operating_ebitda",
-                "operating_ebit",
-                "pat",
-            ],
-        },
-    )
-
-    bs = pc_get_company_endpoint(
-        encrypted_id,
-        "balance-sheet",
-        token,
-        params={
-            "no_of_years": no_of_years,
-            "source": "mca",
-            "type": "detailed",
-            "xbrl_type_tag": xbrl_type_tag,
-            "field_list": ["fiscal_year", "payable_outstanding_days", "sales_outstanding_days", "inventory_outstanding_days"],
-        },
-    )
-
-    ratios = pc_get_company_endpoint(
-        encrypted_id,
-        "basic-financial-ratios",
-        token,
-        params={
-            "no_of_years": no_of_years,
-            "source": "mca",
-            "xbrl_type_tag": xbrl_type_tag,
-            "field_list": ["fiscal_year", "roce_percent"],
-        },
-    )
-
-    return {"overview": ov, "income_statement": inc, "balance_sheet": bs, "basic_financial_ratios": ratios}
+def to_inr_mn(value: Any, divisor: float = 1_000_000.0) -> Optional[float]:
+    """Convert an API amount to INR mn using the response-specific divisor."""
+    number = _pc_number(value)
+    if number is None:
+        return None
+    safe_divisor = divisor if divisor and divisor > 0 else 1.0
+    return round(number / safe_divisor, 2)
 
 
-def apply_financials_format(ws, max_row: int, n_years: int):
-    title_font = Font(bold=True, size=14)
-    header_fill = PatternFill("solid", fgColor="1F4E79")
-    header_font = Font(bold=True, color="FFFFFF")
-    section_fill = PatternFill("solid", fgColor="D9E1F2")
-    bold = Font(bold=True)
+def _pc_notes(payload: Dict[str, Any]) -> List[str]:
+    notes = payload.get("notes") or []
+    if isinstance(notes, str):
+        return [notes]
+    return [str(note) for note in notes if note]
 
-    thin = Side(style="thin", color="BFBFBF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws["A1"].font = title_font
-    ws.column_dimensions["A"].width = 34
-    for j in range(n_years):
-        ws.column_dimensions[get_column_letter(2 + j)].width = 16
-    ws.column_dimensions["B"].width = 18
+def privatecircle_amount_divisor(payload: Dict[str, Any]) -> float:
+    """Return the divisor needed to express PrivateCircle amounts in INR mn.
 
-    ws.freeze_panes = "B7"
+    PrivateCircle's current contract says statement values are already in INR mn,
+    while older examples in the same documentation show rupee-scale integers. The
+    response notes (or the explicit environment override) therefore take priority.
+    """
+    override = os.getenv("PC_FINANCIAL_INPUT_UNIT", "auto").strip().lower()
+    if override in {"inr_mn", "mn", "million", "millions"}:
+        return 1.0
+    if override in {"inr", "rupees", "raw_inr"}:
+        return 1_000_000.0
 
-    for r in range(1, max_row + 1):
-        for c in range(1, 2 + max(n_years, 1)):
-            cell = ws.cell(r, c)
-            if cell.value is None:
+    unit_candidates = [payload.get("unit"), payload.get("units"), payload.get("currency_unit")]
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    unit_candidates.extend([meta.get("unit"), meta.get("units"), meta.get("currency_unit")])
+    unit_text = " ".join(str(value) for value in unit_candidates if value).lower()
+    notes_text = " ".join(_pc_notes(payload)).lower()
+    combined = f"{unit_text} {notes_text}"
+    if re.search(r"inr\s*(mn|mm|million)", combined):
+        return 1.0
+    if "rupee" in combined or re.search(r"\binr\b", combined):
+        return 1_000_000.0
+
+    # Last-resort compatibility for legacy responses with no unit metadata.
+    amount_values: List[float] = []
+    excluded_fragments = ("year", "percent", "ratio", "days", "date", "id", "eps")
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        for key, value in item.items():
+            if any(fragment in str(key).lower() for fragment in excluded_fragments):
                 continue
-            cell.border = border
-            if c == 1:
-                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-            else:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+            number = _pc_number(value)
+            if number is not None and number != 0:
+                amount_values.append(abs(number))
+    if amount_values:
+        amount_values.sort()
+        median = amount_values[len(amount_values) // 2]
+        if median >= 1_000_000:
+            return 1_000_000.0
+    return 1.0
 
-    for r in range(1, max_row + 1):
-        if ws.cell(r, 1).value == "Metric":
-            for c in range(1, 2 + max(n_years, 1)):
-                cell = ws.cell(r, c)
-                cell.fill = header_fill
-                cell.font = header_font
 
-    for r in range(1, max_row + 1):
-        v = ws.cell(r, 1).value
-        if isinstance(v, str) and v in {
-            "Income Statement (Last 5 years)",
-            "Balance Sheet (Working Capital Days)",
-            "Basic Financial Ratios",
-            "3Y Summary Metrics",
-        }:
-            for c in range(1, 2 + max(n_years, 1)):
-                ws.cell(r, c).fill = section_fill
-            ws.cell(r, 1).font = bold
+def _pc_overview_item(payload: Dict[str, Any]) -> Dict[str, Any]:
+    items = payload.get("items") or []
+    return items[0] if items and isinstance(items[0], dict) else {}
+
+
+def _privatecircle_preferred_source(overview: Dict[str, Any]) -> str:
+    listing_status = re.sub(r"[^a-z]", "", str(overview.get("listing_status") or "").lower())
+    return "exchange_filings" if listing_status in {"listed", "publiclylisted"} else "mca"
+
+
+def _statement_candidates(preferred_source: str, requested_basis: str) -> List[Tuple[Optional[str], str]]:
+    bases = [requested_basis] if requested_basis in {"consolidated", "standalone"} else ["consolidated", "standalone"]
+    candidates: List[Tuple[Optional[str], str]] = []
+    for source in (preferred_source, None):
+        for basis in bases:
+            candidate = (source, basis)
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _pull_privatecircle_dataset(
+    encrypted_id: str,
+    token: str,
+    suffix: str,
+    no_of_years: int,
+    candidates: List[Tuple[Optional[str], str]],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    errors: List[str] = []
+    for source, basis in candidates:
+        params: Dict[str, Any] = {
+            "no_of_years": no_of_years,
+            "xbrl_type_tag": basis,
+        }
+        if source:
+            params["source"] = source
+        if suffix != "basic-financial-ratios":
+            params["type"] = "detailed"
+        try:
+            payload = pc_get_company_endpoint(encrypted_id, suffix, token, params=params)
+        except RuntimeError as exc:
+            message = str(exc)
+            if any(code in message for code in ("HTTP 400", "HTTP 404", "HTTP 422")):
+                errors.append(message)
+                continue
+            raise
+        if payload.get("items"):
+            return payload, {
+                "source": source or "api_default",
+                "xbrl_type_tag": basis,
+                "item_count": len(payload.get("items") or []),
+                "errors": errors,
+            }
+    fallback_basis = candidates[0][1] if candidates else "auto"
+    return {"items": [], "notes": []}, {
+        "source": preferred_source,
+        "xbrl_type_tag": fallback_basis,
+        "item_count": 0,
+        "errors": errors,
+    }
+
+
+def pull_financial_statements(
+    encrypted_id: str,
+    token: str,
+    no_of_years: int = 5,
+    xbrl_type_tag: str = "auto",
+) -> Dict[str, Any]:
+    """Pull a complete, internally documented PrivateCircle financial package."""
+    overview_payload = pc_get_company_endpoint(encrypted_id, "overview", token)
+    overview = _pc_overview_item(overview_payload)
+    preferred_source = _privatecircle_preferred_source(overview)
+    candidates = _statement_candidates(preferred_source, xbrl_type_tag.strip().lower())
+
+    income, income_meta = _pull_privatecircle_dataset(
+        encrypted_id, token, "income-statement", no_of_years, candidates
+    )
+    chosen = (income_meta.get("source"), income_meta.get("xbrl_type_tag"))
+    chosen_source = None if chosen[0] == "api_default" else chosen[0]
+    ordered_candidates = [(chosen_source, chosen[1])] + [c for c in candidates if c != (chosen_source, chosen[1])]
+
+    balance, balance_meta = _pull_privatecircle_dataset(
+        encrypted_id, token, "balance-sheet", no_of_years, ordered_candidates
+    )
+    cash_flow, cash_flow_meta = _pull_privatecircle_dataset(
+        encrypted_id, token, "cash-flow", no_of_years, ordered_candidates
+    )
+    ratios, ratios_meta = _pull_privatecircle_dataset(
+        encrypted_id, token, "basic-financial-ratios", no_of_years, ordered_candidates
+    )
+
+    return {
+        "overview": overview_payload,
+        "income_statement": income,
+        "balance_sheet": balance,
+        "cash_flow": cash_flow,
+        "basic_financial_ratios": ratios,
+        "_meta": {
+            "preferred_source": preferred_source,
+            "income_statement": income_meta,
+            "balance_sheet": balance_meta,
+            "cash_flow": cash_flow_meta,
+            "basic_financial_ratios": ratios_meta,
+        },
+    }
+
+
+def _year_map(items: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    mapped: Dict[int, Dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            year = int(item.get("fiscal_year"))
+        except (TypeError, ValueError):
+            continue
+        mapped[year] = item
+    return mapped
+
+
+def _first_number(row: Dict[str, Any], fields: Tuple[str, ...]) -> Optional[float]:
+    for field in fields:
+        value = _pc_number(row.get(field))
+        if value is not None:
+            return value
+    return None
+
+
+def apply_financials_format(ws, max_row: int, n_years: int, section_rows: List[int], header_rows: List[int], check_rows: List[int]):
+    last_col = 1 + max(n_years, 1)
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "B9"
+    ws.column_dimensions["A"].width = 42
+    for column in range(2, last_col + 1):
+        ws.column_dimensions[get_column_letter(column)].width = 15
+
+    ws["A1"].font = Font(bold=True, size=15, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+    for column in range(2, last_col + 1):
+        ws.cell(1, column).fill = PatternFill("solid", fgColor="17365D")
+
+    thin_gray = Side(style="thin", color="D9E2F3")
+    for row in range(1, max_row + 1):
+        ws.row_dimensions[row].height = {2: 24, 3: 24, 4: 24, 5: 38, 6: 38, 7: 24}.get(row, 19)
+        for column in range(1, last_col + 1):
+            cell = ws.cell(row, column)
+            if isinstance(cell, MergedCell):
+                continue
+            cell.alignment = Alignment(
+                horizontal="left" if column == 1 else "right",
+                vertical="center",
+                wrap_text=column == 1,
+            )
+            if cell.value is not None and row not in section_rows:
+                cell.border = Border(bottom=thin_gray)
+
+    for row in section_rows:
+        for column in range(1, last_col + 1):
+            cell = ws.cell(row, column)
+            cell.fill = PatternFill("solid", fgColor="1F4E79")
+            cell.font = Font(bold=True, color="FFFFFF")
+        ws.row_dimensions[row].height = 22
+
+    for row in header_rows:
+        for column in range(1, last_col + 1):
+            cell = ws.cell(row, column)
+            cell.fill = PatternFill("solid", fgColor="D9EAF7")
+            cell.font = Font(bold=True, color="17365D")
+            cell.border = Border(bottom=Side(style="medium", color="7F8FA6"))
+
+    for row in check_rows:
+        ws.cell(row, 1).font = Font(bold=True)
+        for column in range(2, last_col + 1):
+            ws.cell(row, column).fill = PatternFill("solid", fgColor="E2F0D9")
+
+    for row in range(2, min(max_row, 7) + 1):
+        ws.cell(row, 1).font = Font(bold=True, color="404040")
+        ws.cell(row, 2).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
 
 def write_financials_sheet(wb: openpyxl.Workbook, encrypted_id: str, token: str):
     ws = ensure_financials_sheet(wb)
+    fin = pull_financial_statements(encrypted_id, token, no_of_years=5, xbrl_type_tag="auto")
 
-    fin = pull_financial_statements(encrypted_id, token, no_of_years=5, xbrl_type_tag="consolidated")
-    inc_items = fin.get("income_statement", {}).get("items") or []
-    if not inc_items:
-        fin = pull_financial_statements(encrypted_id, token, no_of_years=5, xbrl_type_tag="standalone")
-        inc_items = fin.get("income_statement", {}).get("items") or []
-
-    bs_items = fin.get("balance_sheet", {}).get("items") or []
-    ratios_items = fin.get("basic_financial_ratios", {}).get("items") or []
-    ov_items = fin.get("overview", {}).get("items") or []
-    ov = ov_items[0] if ov_items else {}
-
-    if not inc_items:
-        ws.cell(1, 1).value = "No Income Statement data available from PrivateCircle."
+    datasets = {
+        "income_statement": fin.get("income_statement") or {},
+        "balance_sheet": fin.get("balance_sheet") or {},
+        "cash_flow": fin.get("cash_flow") or {},
+        "basic_financial_ratios": fin.get("basic_financial_ratios") or {},
+    }
+    overview = _pc_overview_item(fin.get("overview") or {})
+    maps = {name: _year_map(payload.get("items") or []) for name, payload in datasets.items()}
+    all_years = sorted({year for mapped in maps.values() for year in mapped}, reverse=True)[:5]
+    years = sorted(all_years)
+    if not years:
+        ws["A1"] = "No financial statement data available from PrivateCircle."
+        ws["A2"] = "The company match succeeded, but the statement endpoints returned no fiscal-year records."
         return
 
-    years = sorted({int(x["fiscal_year"]) for x in inc_items if x.get("fiscal_year")}, reverse=True)[:5]
-    years = sorted(years)
+    n_years = len(years)
+    last_col = 1 + n_years
+    metadata = fin.get("_meta") or {}
+    divisors = {
+        name: privatecircle_amount_divisor(payload)
+        for name, payload in datasets.items()
+        if name != "basic_financial_ratios"
+    }
+    unit_descriptions = []
+    for name in ("income_statement", "balance_sheet", "cash_flow"):
+        if datasets[name].get("items"):
+            interpretation = "already INR mn" if divisors[name] == 1 else "raw INR divided by 1,000,000"
+            unit_descriptions.append(f"{name.replace('_', ' ').title()}: {interpretation}")
 
-    inc_by_year = {int(x["fiscal_year"]): x for x in inc_items if x.get("fiscal_year")}
-    bs_by_year = {int(x["fiscal_year"]): x for x in bs_items if x.get("fiscal_year")}
-    ratios_by_year = {int(x["fiscal_year"]): x for x in ratios_items if x.get("fiscal_year")}
+    basis_parts = []
+    for name in ("income_statement", "balance_sheet", "cash_flow", "basic_financial_ratios"):
+        item_meta = metadata.get(name) or {}
+        if item_meta.get("item_count"):
+            basis_parts.append(
+                f"{name.replace('_', ' ').title()}: {item_meta.get('source')} / {item_meta.get('xbrl_type_tag')}"
+            )
 
-    def num(v):
-        if v is None:
-            return None
-        if isinstance(v, (int, float)):
-            return float(v)
-        s = str(v).strip().lower()
-        if s in {"", "na", "nm", "none"}:
-            return None
-        try:
-            return float(str(v).replace(",", ""))
-        except Exception:
-            return None
+    ws["A1"] = "PrivateCircle Financial Analysis"
+    ws["A2"] = "Company"
+    ws["B2"] = overview.get("name") or "Not disclosed"
+    ws["A3"] = "CIN"
+    ws["B3"] = overview.get("true_cin") or overview.get("true_cid") or "Not disclosed"
+    ws["A4"] = "Listing status"
+    ws["B4"] = overview.get("listing_status") or "Not disclosed"
+    ws["A5"] = "Statement source / filing basis"
+    ws["B5"] = "; ".join(basis_parts) or "No statement metadata returned"
+    ws["A6"] = "Units shown"
+    ws["B6"] = "INR mn. " + ("; ".join(unit_descriptions) or "No amount-bearing statements returned")
+    ws["A7"] = "Profile"
+    ws["B7"] = overview.get("profile_link") or "PrivateCircle API"
+    if last_col > 2:
+        for metadata_row in range(2, 8):
+            ws.merge_cells(start_row=metadata_row, start_column=2, end_row=metadata_row, end_column=last_col)
 
-    def exports_val(row: Dict[str, Any]) -> float:
-        v = num(row.get("total_export_sales"))
-        if v is not None:
-            return v
-        a = num(row.get("export_goods_manf_sales")) or 0.0
-        b = num(row.get("export_goods_traded_sales")) or 0.0
-        c = num(row.get("export_services_sales")) or 0.0
-        return a + b + c
+    section_rows: List[int] = []
+    header_rows: List[int] = []
+    check_rows: List[int] = []
+    row_map: Dict[str, int] = {}
+    r = 9
 
-    def total_income_val(row):
-        v = num(row.get("total_revenue"))
-        if v is not None:
-            return v
-        ops = num(row.get("revenue_from_operations"))
-        if ops is None:
-            ops = num(row.get("total_sales_wo_other_income"))
-        other = num(row.get("other_income")) or 0.0
-        if ops is not None:
-            return ops + other
-        return None
-
-    ws.cell(1, 1).value = "Financials (Source: PrivateCircle)"
-    ws.cell(2, 1).value = "Company"
-    ws.cell(2, 2).value = ov.get("name") or "Not disclosed"
-    ws.cell(3, 1).value = "Note: API returns figures as reported (see PrivateCircle notes)."
-
-    r = 5
-    ws.cell(r, 1).value = "Income Statement (Last 5 years)"
-    r += 1
-
-    ws.cell(r, 1).value = "Metric"
-    for j, y in enumerate(years):
-        ws.cell(r, 2 + j).value = f"FY{y}"
-    r += 1
-
-    start_col = 2
-    n = len(years)
-    row_map = {}
-
-    def write_value_row(label: str, getter):
+    def section(title: str, value_header: bool = False):
         nonlocal r
-        ws.cell(r, 1).value = label
-        for j, y in enumerate(years):
-            row = inc_by_year.get(y, {})
-            v = getter(row)
-            ws.cell(r, start_col + j).value = v
-        row_map[label] = r
+        ws.cell(r, 1).value = title
+        section_rows.append(r)
         r += 1
-
-    def write_percent_row(label: str, numerator_label: str, denom_label: str):
-        nonlocal r
-        ws.cell(r, 1).value = label
-        nr = row_map[numerator_label]
-        dr = row_map[denom_label]
-        for j in range(n):
-            col = get_column_letter(start_col + j)
-            ws.cell(r, start_col + j).value = f'=IFERROR({col}{nr}/{col}{dr},"")'
-            ws.cell(r, start_col + j).number_format = "0.00%"
-        row_map[label] = r
-        r += 1
-
-    write_value_row("Revenue from Operations", lambda row: to_inr_mn(num(row.get("revenue_from_operations"))))
-    write_value_row("Total Revenue", lambda row: to_inr_mn(total_income_val(row)))
-    write_value_row("Exports", lambda row: to_inr_mn(exports_val(row)))
-    write_percent_row("Exports %", "Exports", "Revenue from Operations")
-
-    write_value_row("Gross Profit", lambda row: to_inr_mn(num(row.get("gross_profit"))))
-    write_percent_row("GP %", "Gross Profit", "Revenue from Operations")
-
-    write_value_row("Operating EBITDA", lambda row: to_inr_mn(num(row.get("operating_ebitda"))))
-    write_percent_row("Operating EBITDA%", "Operating EBITDA", "Revenue from Operations")
-
-    write_value_row("Operating EBIT", lambda row: to_inr_mn(num(row.get("operating_ebit"))))
-    write_percent_row("Operating EBIT%", "Operating EBIT", "Revenue from Operations")
-
-    write_value_row("PAT", lambda row: to_inr_mn(num(row.get("pat"))))
-    write_percent_row("PAT %", "PAT", "Revenue from Operations")
-
-    amount_rows = {"Revenue from Operations", "Total Revenue", "Exports", "Gross Profit", "Operating EBITDA", "Operating EBIT", "PAT"}
-    for label in amount_rows:
-        rr = row_map[label]
-        for j in range(n):
-            ws.cell(rr, start_col + j).number_format = "#,##0"
-
-    r += 1
-
-    ws.cell(r, 1).value = "Balance Sheet (Working Capital Days)"
-    r += 1
-    ws.cell(r, 1).value = "Metric"
-    for j, y in enumerate(years):
-        ws.cell(r, 2 + j).value = f"FY{y}"
-    r += 1
-
-    def write_bs_row(label: str, field: str):
-        nonlocal r
-        ws.cell(r, 1).value = label
-        for j, y in enumerate(years):
-            ws.cell(r, 2 + j).value = num(bs_by_year.get(y, {}).get(field))
-            ws.cell(r, 2 + j).number_format = "0.0"
-        row_map[label] = r
-        r += 1
-
-    write_bs_row("Days Trade payables", "payable_outstanding_days")
-    write_bs_row("Days Sales outstanding", "sales_outstanding_days")
-    write_bs_row("Days Inventory outstanding", "inventory_outstanding_days")
-
-    ws.cell(r, 1).value = "Net cash conversion cycle"
-    pay_r = row_map["Days Trade payables"]
-    so_r = row_map["Days Sales outstanding"]
-    inv_r = row_map["Days Inventory outstanding"]
-    for j in range(n):
-        col = get_column_letter(2 + j)
-        ws.cell(r, 2 + j).value = f'=IFERROR({col}{inv_r}+{col}{so_r}-{col}{pay_r},"")'
-        ws.cell(r, 2 + j).number_format = "0.0"
-    row_map["Net cash conversion cycle"] = r
-    r += 2
-
-    ws.cell(r, 1).value = "Basic Financial Ratios"
-    r += 1
-    ws.cell(r, 1).value = "Metric"
-    for j, y in enumerate(years):
-        ws.cell(r, 2 + j).value = f"FY{y}"
-    r += 1
-
-    ws.cell(r, 1).value = "RoCE"
-    roce_row = r
-    for j, y in enumerate(years):
-        v = num((ratios_by_year.get(y) or {}).get("roce_percent"))
-        if v is None:
-            ws.cell(r, 2 + j).value = ""
+        ws.cell(r, 1).value = "Metric"
+        if value_header:
+            ws.cell(r, 2).value = "Value"
         else:
-            ws.cell(r, 2 + j).value = v / 100.0
-            ws.cell(r, 2 + j).number_format = "0.00%"
+            for j, year in enumerate(years, start=2):
+                ws.cell(r, j).value = f"FY{year}"
+        header_rows.append(r)
+        r += 1
+
+    def write_amount(label: str, dataset_name: str, *fields: str, sum_fields: Tuple[str, ...] = ()):
+        nonlocal r
+        ws.cell(r, 1).value = label
+        divisor = divisors.get(dataset_name, 1.0)
+        for j, year in enumerate(years, start=2):
+            source_row = maps[dataset_name].get(year, {})
+            raw = _first_number(source_row, tuple(fields))
+            if raw is None and sum_fields:
+                components = [_pc_number(source_row.get(field)) for field in sum_fields]
+                available = [value for value in components if value is not None]
+                raw = sum(available) if available else None
+            ws.cell(r, j).value = to_inr_mn(raw, divisor)
+            ws.cell(r, j).number_format = '#,##0.0;[Red](#,##0.0);-'
+        row_map[label] = r
+        r += 1
+
+    def write_number(label: str, dataset_name: str, *fields: str, number_format: str = "0.0"):
+        nonlocal r
+        ws.cell(r, 1).value = label
+        for j, year in enumerate(years, start=2):
+            ws.cell(r, j).value = _first_number(maps[dataset_name].get(year, {}), tuple(fields))
+            ws.cell(r, j).number_format = number_format
+        row_map[label] = r
+        r += 1
+
+    def write_percent(label: str, dataset_name: str, *fields: str):
+        nonlocal r
+        ws.cell(r, 1).value = label
+        for j, year in enumerate(years, start=2):
+            value = _first_number(maps[dataset_name].get(year, {}), tuple(fields))
+            ws.cell(r, j).value = value / 100.0 if value is not None else None
+            ws.cell(r, j).number_format = '0.0%;[Red](0.0%);-'
+        row_map[label] = r
+        r += 1
+
+    def write_formula_ratio(label: str, numerator: str, denominator: str):
+        nonlocal r
+        ws.cell(r, 1).value = label
+        for j in range(2, last_col + 1):
+            col = get_column_letter(j)
+            ws.cell(r, j).value = f'=IFERROR({col}{row_map[numerator]}/{col}{row_map[denominator]},"")'
+            ws.cell(r, j).number_format = '0.0%;[Red](0.0%);-'
+        row_map[label] = r
+        r += 1
+
+    section("Income Statement")
+    write_amount("Revenue from Operations", "income_statement", "revenue_from_operations", "total_sales_wo_other_income")
+    write_amount("Other Income", "income_statement", "other_income")
+    write_amount(
+        "Total Revenue",
+        "income_statement",
+        "total_revenue",
+        "total_income",
+        sum_fields=("revenue_from_operations", "other_income"),
+    )
+    write_amount(
+        "Export Sales",
+        "income_statement",
+        "total_export_sales",
+        sum_fields=("export_goods_manf_sales", "export_goods_traded_sales", "export_services_sales"),
+    )
+    write_formula_ratio("Exports % of Revenue", "Export Sales", "Revenue from Operations")
+    write_amount("Cost of Goods Sold", "income_statement", "cost_of_goods_sold")
+    write_amount("Gross Profit", "income_statement", "gross_profit")
+    write_formula_ratio("Gross Margin", "Gross Profit", "Revenue from Operations")
+    write_amount("Operating EBITDA", "income_statement", "operating_ebitda")
+    write_formula_ratio("Operating EBITDA Margin", "Operating EBITDA", "Revenue from Operations")
+    write_amount("Reported EBITDA", "income_statement", "ebitda")
+    write_amount("Depreciation & Amortisation", "income_statement", "depreciation_amortization")
+    write_amount("Operating EBIT", "income_statement", "operating_ebit")
+    write_amount("Finance Cost", "income_statement", "finance_cost")
+    write_amount("Profit Before Tax", "income_statement", "pbt", "pbt_from_co")
+    write_amount("Profit After Tax", "income_statement", "pat", "profit_loss_from_co")
+    write_formula_ratio("PAT Margin", "Profit After Tax", "Total Revenue")
+    r += 1
+
+    section("Balance Sheet")
+    write_amount("Equity Capital", "balance_sheet", "bs_total_equity_capital")
+    write_amount("Reserves & Surplus", "balance_sheet", "bs_reserves_and_surplus")
+    write_amount("Non-current Liabilities", "balance_sheet", "bs_noncurrent_liabilities")
+    write_amount("Net Fixed Assets", "balance_sheet", "bs_total_net_fixed_assets")
+    write_amount("Trade Receivables", "balance_sheet", "bs_trade_receivables")
+    write_amount("Cash & Bank Balance", "balance_sheet", "bs_cash_and_bank_balance")
+    write_amount("Current Assets ex Cash", "balance_sheet", "bs_current_assets_ex_cash")
+    write_amount("Current Liabilities", "balance_sheet", "bs_current_liabilities")
+    write_amount("Trade Payables", "balance_sheet", "bs_trade_payables")
+    write_amount("Net Working Capital ex Cash", "balance_sheet", "bs_net_working_capital")
+    write_amount("Total Assets", "balance_sheet", "bs_total_assets", "bs_total_applications")
+    write_amount("Total Liabilities", "balance_sheet", "bs_total_liabilities")
+    write_number("Receivable Days", "balance_sheet", "sales_outstanding_days")
+    write_number("Inventory Days", "balance_sheet", "inventory_outstanding_days")
+    write_number("Payable Days", "balance_sheet", "payable_outstanding_days")
+    write_number("Cash Conversion Cycle", "balance_sheet", "cash_conversion_cycle")
+    r += 1
+
+    section("Cash Flow Statement")
+    write_amount("Cash Flow from Operations", "cash_flow", "net_cashflows_from_operatng_activts", "net_cashflows_from_operations")
+    write_amount("Cash Flow from Investing", "cash_flow", "net_cashflows_from_investing_activities")
+    write_amount("Cash Flow from Financing", "cash_flow", "net_cashflows_from_financing_activities")
+    write_amount("Purchase of Tangible Assets", "cash_flow", "purchase_of_tangible_assets")
+    write_amount(
+        "Purchase of Intangible Assets",
+        "cash_flow",
+        sum_fields=("prchs_of_intangible_assets_clsfdas_inv_acts", "purchase_of_intangible_assets_under_development"),
+    )
+    write_amount("Income Taxes Paid", "cash_flow", "income_taxes_paid_refund")
+    write_amount("Net Change in Cash", "cash_flow", "net_inc_dec_in_cash_and_cash_equival")
+    write_amount("Closing Cash & Cash Equivalents", "cash_flow", "cash_and_cash_equival_stat_at_end_of_period", "cash_and_bank_balance")
+    ws.cell(r, 1).value = "Free Cash Flow (CFO - Capex)"
+    for j in range(2, last_col + 1):
+        col = get_column_letter(j)
+        ws.cell(r, j).value = (
+            f'=IFERROR({col}{row_map["Cash Flow from Operations"]}'
+            f'-ABS({col}{row_map["Purchase of Tangible Assets"]})'
+            f'-ABS({col}{row_map["Purchase of Intangible Assets"]}),"")'
+        )
+        ws.cell(r, j).number_format = '#,##0.0;[Red](#,##0.0);-'
+    row_map["Free Cash Flow (CFO - Capex)"] = r
     r += 2
 
-    ws.cell(r, 1).value = "3Y Summary Metrics"
+    section("Basic Financial Ratios")
+    write_number("Current Ratio", "basic_financial_ratios", "current_ratio", number_format='0.0x;[Red](0.0x);-')
+    write_number("Debt / Equity", "basic_financial_ratios", "debt_equity_ratio", number_format='0.0x;[Red](0.0x);-')
+    write_percent("ROCE", "basic_financial_ratios", "roce_percent")
+    write_percent("ROE", "basic_financial_ratios", "roe_percent")
+    write_percent("ROI", "basic_financial_ratios", "roi_percent")
     r += 1
-    ws.cell(r, 1).value = "Metric"
-    ws.cell(r, 2).value = "Value"
+
+    section("Key Outputs", value_header=True)
+    latest_col = get_column_letter(last_col)
+    ws.cell(r, 1).value = "Latest Revenue"
+    ws.cell(r, 2).value = f'={latest_col}{row_map["Revenue from Operations"]}'
+    ws.cell(r, 2).number_format = '#,##0.0;[Red](#,##0.0);-'
+    r += 1
+    ws.cell(r, 1).value = "Latest Operating EBITDA Margin"
+    ws.cell(r, 2).value = f'={latest_col}{row_map["Operating EBITDA Margin"]}'
+    ws.cell(r, 2).number_format = '0.0%;[Red](0.0%);-'
+    r += 1
+    ws.cell(r, 1).value = "Latest PAT Margin"
+    ws.cell(r, 2).value = f'={latest_col}{row_map["PAT Margin"]}'
+    ws.cell(r, 2).number_format = '0.0%;[Red](0.0%);-'
+    r += 1
+    if n_years >= 4:
+        start_index = n_years - 4
+        start_col_letter = get_column_letter(2 + start_index)
+        periods = years[-1] - years[start_index]
+        ws.cell(r, 1).value = f"Revenue CAGR ({periods} years)"
+        ws.cell(r, 2).value = (
+            f'=IFERROR(POWER({latest_col}{row_map["Revenue from Operations"]}/'
+            f'{start_col_letter}{row_map["Revenue from Operations"]},1/{periods})-1,"")'
+        )
+        ws.cell(r, 2).number_format = '0.0%;[Red](0.0%);-'
+        r += 1
     r += 1
 
-    if n >= 4:
-        last_idx = n - 1
-        start3_idx = n - 4
+    section("Data Quality Checks")
+    ws.cell(r, 1).value = "Balance Sheet Difference"
+    for j in range(2, last_col + 1):
+        col = get_column_letter(j)
+        ws.cell(r, j).value = f'=IFERROR({col}{row_map["Total Assets"]}-{col}{row_map["Total Liabilities"]},"")'
+        ws.cell(r, j).number_format = '#,##0.0;[Red](#,##0.0);-'
+    check_rows.append(r)
+    r += 1
+    ws.cell(r, 1).value = "Statement Coverage"
+    for j, year in enumerate(years, start=2):
+        present = [name for name, mapped in maps.items() if year in mapped]
+        ws.cell(r, j).value = f"{len(present)}/4 datasets"
+        ws.cell(r, j).alignment = Alignment(horizontal="center")
+    check_rows.append(r)
+    r += 2
 
-        rev_r = row_map["Revenue from Operations"]
-        ebitda_r = row_map["Operating EBITDA"]
+    ws.cell(r, 1).value = "PrivateCircle API Notes"
+    section_rows.append(r)
+    r += 1
+    for dataset_name, payload in datasets.items():
+        for note in _pc_notes(payload):
+            ws.cell(r, 1).value = dataset_name.replace("_", " ").title()
+            ws.cell(r, 2).value = note
+            ws.cell(r, 2).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            ws.row_dimensions[r].height = 30
+            r += 1
 
-        rev_end = f"{get_column_letter(start_col + last_idx)}{rev_r}"
-        rev_start = f"{get_column_letter(start_col + start3_idx)}{rev_r}"
-        e_end = f"{get_column_letter(start_col + last_idx)}{ebitda_r}"
-        e_start = f"{get_column_letter(start_col + start3_idx)}{ebitda_r}"
-
-        ws.cell(r, 1).value = "3Y Revenue CAGR"
-        ws.cell(r, 2).value = f'=IFERROR(POWER({rev_end}/{rev_start},1/3)-1,"")'
-        ws.cell(r, 2).number_format = "0.00%"
-        r += 1
-
-        ws.cell(r, 1).value = "3Y EBITDA CAGR"
-        ws.cell(r, 2).value = f'=IFERROR(POWER({e_end}/{e_start},1/3)-1,"")'
-        ws.cell(r, 2).number_format = "0.00%"
-        r += 1
-
-        c1 = get_column_letter(2 + (n - 3))
-        c2 = get_column_letter(2 + (n - 2))
-        c3 = get_column_letter(2 + (n - 1))
-        ws.cell(r, 1).value = "3Y Average RoCE"
-        ws.cell(r, 2).value = f'=IFERROR(AVERAGE({c1}{roce_row},{c2}{roce_row},{c3}{roce_row}),"")'
-        ws.cell(r, 2).number_format = "0.00%"
-        r += 1
-
-    apply_financials_format(ws, max_row=r, n_years=n)
+    apply_financials_format(ws, max_row=r, n_years=n_years, section_rows=section_rows, header_rows=header_rows, check_rows=check_rows)
 
 
 # ---------------------------
@@ -1103,12 +1685,21 @@ def write_financials_sheet(wb: openpyxl.Workbook, encrypted_id: str, token: str)
 # ---------------------------
 def _responses_create(client: OpenAI, **kwargs):
     """
-    Tries response_format if supported; falls back cleanly.
+    Normalize older ``response_format`` calls to the Responses API ``text``
+    format and remove parameters unsupported by current reasoning models.
     """
+    response_format = kwargs.pop("response_format", None)
+    if response_format and "text" not in kwargs:
+        kwargs["text"] = {"format": response_format}
+
+    model = str(kwargs.get("model", ""))
+    if model.startswith("gpt-5"):
+        kwargs.pop("temperature", None)
+
     try:
         return client.responses.create(**kwargs)
     except TypeError:
-        kwargs.pop("response_format", None)
+        kwargs.pop("text", None)
         return client.responses.create(**kwargs)
 
 
@@ -1203,6 +1794,16 @@ MARKET DEFINITION (MANDATORY — do not deviate):
 - EXCLUDE: {", ".join(market_def.get("exclude_markets", []))}
 """.strip()
 
+    identity_context = ""
+    if market_def.get("official_website") or market_def.get("legal_name"):
+        verified_sources = market_def.get("verified_sources") or []
+        identity_context = f"""
+ENTITY IDENTITY (use this to avoid similarly named companies):
+- Legal name: {market_def.get("legal_name") or company}
+- Official website: {market_def.get("official_website") or "Not confirmed"}
+- Verified high-value sources: {", ".join(verified_sources[:12]) or "None pre-verified"}
+""".strip()
+
     return f"""
 Use web search and collect ONLY verifiable facts.
 
@@ -1210,6 +1811,7 @@ Company: {company}
 Topic: {particular}
 
 {market_context}
+{identity_context}
 
 Row-specific instructions:
 {row_prompt}
@@ -1349,7 +1951,8 @@ def evidence_gated_research_flat(
         desc, sources_txt = text, ""
 
     desc = normalize_bullets(desc)
-    src_urls = extract_urls(sources_txt)
+    evidence_urls = {canonical_url(f["evidence_url"]) for f in cleaned_facts}
+    src_urls = [url for url in extract_urls(sources_txt) if url in evidence_urls]
     if not src_urls:
         src_urls = list(dict.fromkeys([f["evidence_url"] for f in cleaned_facts]))[:8]
 
@@ -1461,7 +2064,12 @@ def evidence_gated_research_rowwise(
             bullets = ["Not publicly disclosed"]
         normalized_rows.append({"label": lab, "bullets": bullets})
 
-    src_urls = [canonical_url(u) for u in sources if isinstance(u, str) and u.startswith("http")]
+    evidence_urls = {canonical_url(f["evidence_url"]) for f in cleaned_facts}
+    src_urls = [
+        canonical_url(u)
+        for u in sources
+        if isinstance(u, str) and canonical_url(u) in evidence_urls
+    ]
     if not src_urls:
         src_urls = list(dict.fromkeys([f["evidence_url"] for f in cleaned_facts]))[:8]
 
@@ -1519,6 +2127,7 @@ def competitors_research_json(company: str, market_def: Dict[str, Any], client: 
     particular = "competitors"
     cleaned_facts = fetch_facts_cached(company, particular, market_def, client, facts_cache)
     facts_json = json.dumps({"facts": cleaned_facts}, ensure_ascii=False)
+    evidence_urls = {canonical_url(f["evidence_url"]) for f in cleaned_facts}
 
     market_context = ""
     if market_def:
@@ -1570,7 +2179,11 @@ FACTS_JSON:
             sources = x.get("sources", [])
             if not isinstance(sources, list):
                 sources = extract_urls(str(sources))
-            sources = [canonical_url(s) for s in sources if isinstance(s, str) and s.startswith("http")]
+            sources = [
+                canonical_url(s)
+                for s in sources
+                if isinstance(s, str) and canonical_url(s) in evidence_urls
+            ]
             if name and sources:
                 cleaned.append({"name": name, "hq": hq, "description": desc, "sources": list(dict.fromkeys(sources))[:6]})
         return cleaned
@@ -1598,6 +2211,7 @@ def ma_research_json(company: str, market_def: Dict[str, Any], client: OpenAI, f
     particular = "m&a landscape"
     cleaned_facts = fetch_facts_cached(company, particular, market_def, client, facts_cache)
     facts_json = json.dumps({"facts": cleaned_facts}, ensure_ascii=False)
+    evidence_urls = {canonical_url(f["evidence_url"]) for f in cleaned_facts}
 
     market_context = ""
     if market_def:
@@ -1659,7 +2273,7 @@ Rules:
             if not isinstance(d, dict):
                 continue
             src = canonical_url(str(d.get("source", "")).strip())
-            if not src.startswith("http"):
+            if src not in evidence_urls:
                 continue
             cleaned.append({
                 "acquirer": str(d.get("acquirer", "")).strip(),
@@ -1698,6 +2312,7 @@ def buyers_research_json(company: str, market_def: Dict[str, Any], client: OpenA
     particular = "prospective buyers"
     cleaned_facts = fetch_facts_cached(company, particular, market_def, client, facts_cache)
     facts_json = json.dumps({"facts": cleaned_facts}, ensure_ascii=False)
+    evidence_urls = {canonical_url(f["evidence_url"]) for f in cleaned_facts}
 
     market_context = ""
     if market_def:
@@ -1760,7 +2375,7 @@ Rules:
             if not isinstance(b, dict):
                 continue
             src = canonical_url(str(b.get("source", "")).strip())
-            if not src.startswith("http"):
+            if src not in evidence_urls:
                 continue
             cleaned.append({
                 "buyer": str(b.get("buyer", "")).strip(),
@@ -1798,6 +2413,10 @@ def generate_profile_excel_bytes(
     openai_api_key: str,
     privatecircle_token: str,
     progress_cb=None,
+    cin: str = "",
+    mergermarket_export_name: str = "",
+    mergermarket_export_bytes: Optional[bytes] = None,
+    transaction_scope: str = "Domestic and global",
 ) -> bytes:
     """
     Front-end contract unchanged:
@@ -1809,6 +2428,9 @@ def generate_profile_excel_bytes(
     encrypted_id = (encrypted_id or "").strip()
     openai_api_key = (openai_api_key or "").strip()
     privatecircle_token = (privatecircle_token or "").strip()
+    cin = (cin or "").strip()
+    mergermarket_export_name = (mergermarket_export_name or "").strip()
+    transaction_scope = (transaction_scope or "Domestic and global").strip()
     
 
     if not company_name:
@@ -1845,10 +2467,14 @@ def generate_profile_excel_bytes(
     ws_ma = ensure_ma_sheet(wb)
     ws_buyers = ensure_buyers_sheet(wb)
     ensure_financials_sheet(wb)
+    ws_credit = ensure_credit_rating_sheet(wb)
+    ws_sources = ensure_source_dossier_sheet(wb)
 
     clear_table_sheet_keep_header(ws_comp)
     clear_table_sheet_keep_header(ws_ma)
     clear_table_sheet_keep_header(ws_buyers)
+    clear_table_sheet_keep_header(ws_credit)
+    clear_table_sheet_keep_header(ws_sources)
 
     cb("Pulling financials from PrivateCircle...", 8)
     try:
@@ -1857,11 +2483,54 @@ def generate_profile_excel_bytes(
         ws_fin = ensure_financials_sheet(wb)
         ws_fin.cell(1, 1).value = f"Financials not populated due to error: {e}"
 
-    client = OpenAI(api_key=openai_api_key)
+    cb("Discovering official website and primary sources...", 12)
+    dossier: Dict[str, Any] = {}
+    credit_reports: List[Dict[str, str]] = []
+    orchestrator = None
+    try:
+        orchestrator = ResearchOrchestrator(openai_api_key, model=RESEARCH_MODEL)
+        research_result = orchestrator.run_company_dossier(company_name, cin=cin)
+        dossier = research_result.get("dossier", {})
+        credit_reports = research_result.get("credit_reports", [])
+        write_source_dossier(ws_sources, dossier)
+        write_credit_reports(ws_credit, credit_reports)
+        if not credit_reports:
+            ws_credit.cell(2, 1).value = "No exact official rating-agency report found"
+            ws_credit.cell(2, 8).value = "No verified match was returned for this legal entity."
+    except Exception:
+        # Specialist discovery is additive. Preserve the core profile if the
+        # web-research stage is temporarily unavailable.
+        ws_sources.cell(2, 1).value = "research_error"
+        ws_sources.cell(2, 6).value = "Source discovery was temporarily unavailable."
+        ws_credit.cell(2, 1).value = "Research temporarily unavailable"
+
+    format_source_dossier_sheet(ws_sources)
+    format_credit_rating_sheet(ws_credit)
+
+    client = OpenAI(api_key=openai_api_key, timeout=120.0, max_retries=2)
     facts_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 
-    cb("Building market definition (web search)...", 15)
+    cb("Building market definition (web search)...", 22)
     market_def = get_market_definition(company_name, client=client)
+    market_def["legal_name"] = dossier.get("legal_name") or company_name
+    market_def["official_website"] = dossier.get("official_website") or ""
+    market_def["verified_sources"] = [
+        source.get("url")
+        for source in dossier.get("sources", [])
+        if isinstance(source, dict) and source.get("url")
+    ]
+
+    has_mergermarket_export = bool(mergermarket_export_bytes and mergermarket_export_name)
+    if has_mergermarket_export:
+        cb("Importing and screening Mergermarket transactions...", 27)
+        imported = parse_mergermarket_export(mergermarket_export_name, mergermarket_export_bytes)
+        try:
+            if orchestrator is None:
+                orchestrator = ResearchOrchestrator(openai_api_key, model=RESEARCH_MODEL)
+            orchestrator.classify_transactions(company_name, market_def, imported.deals)
+        except Exception:
+            imported.warnings.append("Automated relevance screening was unavailable; candidates require manual review.")
+        write_transaction_comps_workbook(wb, imported, company_name, transaction_scope)
 
     cb("Filling main sheet...", 18)
 
@@ -1918,6 +2587,10 @@ def generate_profile_excel_bytes(
 
         # M&A sheet
         if key == "m&a landscape":
+            if has_mergermarket_export:
+                ws.cell(r, MAIN_COL_ANSWER).value = "See 'Final Comps', 'Adjacent', 'Excluded', and 'QA' sheets"
+                r += 1
+                continue
             cb("Researching M&A landscape (web search)...", 55)
             ma_json = ma_research_json(company_name, market_def, client=client, facts_cache=facts_cache)
             write_ma(ws_ma, ma_json)
@@ -1978,12 +2651,17 @@ def generate_profile_excel_bytes(
         r += 1
 
     # Final formatting on auxiliary sheets
+    write_evidence_register(wb, facts_cache)
     if COMPETITORS_SHEET in wb.sheetnames:
         format_competitors_sheet(wb[COMPETITORS_SHEET])
     if MA_SHEET in wb.sheetnames:
         format_ma_sheet(wb[MA_SHEET])
     if BUYERS_SHEET in wb.sheetnames:
         format_buyers_sheet(wb[BUYERS_SHEET])
+    if CREDIT_RATING_SHEET in wb.sheetnames:
+        format_credit_rating_sheet(wb[CREDIT_RATING_SHEET])
+    if SOURCE_DOSSIER_SHEET in wb.sheetnames:
+        format_source_dossier_sheet(wb[SOURCE_DOSSIER_SHEET])
 
     cb("Preparing download...", 98)
     bio = io.BytesIO()
