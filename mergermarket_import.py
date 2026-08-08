@@ -18,7 +18,7 @@ def _normalise_header(value: Any) -> str:
 
 HEADER_ALIASES = {
     "deal_id": {"deal id", "mergermarket deal id", "deal number", "deal no", "id"},
-    "announced_date": {"announced date", "announcement date", "date announced", "announcement"},
+    "announced_date": {"announced", "announced date", "announcement date", "date announced", "announcement"},
     "target": {"target", "target company", "target name", "asset target"},
     "acquirer": {"acquirer", "buyer", "bidder", "acquiring company", "acquiror"},
     "seller": {"seller", "vendor", "divestor", "selling shareholder"},
@@ -30,6 +30,7 @@ HEADER_ALIASES = {
         "value",
     },
     "deal_value_usd_mn": {
+        "deal value m",
         "deal value usd mn",
         "deal value usd m",
         "deal value usdm",
@@ -41,7 +42,13 @@ HEADER_ALIASES = {
     "deal_status": {"deal status", "status", "transaction status"},
     "deal_type": {"deal type", "transaction type", "type"},
     "description": {"description", "deal description", "transaction description", "synopsis", "deal synopsis"},
-    "target_sector": {"target sector", "sector", "subsector", "target subsector"},
+    "target_sector": {
+        "target sector",
+        "sector",
+        "subsector",
+        "target subsector",
+        "target subsector name",
+    },
     "target_geography": {"target geography", "geography", "target country", "country"},
     "enterprise_value_usd_mn": {
         "enterprise value usd mn",
@@ -52,8 +59,20 @@ HEADER_ALIASES = {
     },
     "revenue_usd_mn": {"revenue usd mn", "sales usd mn", "target revenue usd mn"},
     "ebitda_usd_mn": {"ebitda usd mn", "target ebitda usd mn", "ltm ebitda usd mn"},
-    "ev_ebitda_reported": {"ev ebitda", "ev ebitda x", "enterprise value ebitda", "ev ebitda multiple"},
-    "ev_revenue_reported": {"ev revenue", "ev sales", "ev revenue x", "ev sales multiple"},
+    "ev_ebitda_reported": {
+        "ev ebitda",
+        "ev ebitda x",
+        "enterprise value ebitda",
+        "ev ebitda multiple",
+        "ebitda multiple",
+    },
+    "ev_revenue_reported": {
+        "ev revenue",
+        "ev sales",
+        "ev revenue x",
+        "ev sales multiple",
+        "revenue multiple",
+    },
     "profile_url": {"deal url", "profile url", "mergermarket profile", "source url", "url"},
 }
 
@@ -259,5 +278,58 @@ def parse_mergermarket_export(filename: str, data: bytes) -> MergermarketImport:
         raw_rows=raw_rows,
         deals=deals,
         source_sheet=sheet_name,
+        warnings=warnings,
+    )
+
+
+def combine_mergermarket_imports(
+    imports: Sequence[MergermarketImport],
+    source_name: str = "Combined Mergermarket exports",
+) -> MergermarketImport:
+    """Union multiple authorised exports and deduplicate their normalized deals."""
+    if not imports:
+        raise ValueError("At least one Mergermarket export is required.")
+
+    headers: List[str] = []
+    for imported in imports:
+        for header in imported.headers:
+            if header not in headers:
+                headers.append(header)
+
+    raw_rows: List[List[Any]] = []
+    warnings: List[str] = []
+    deals: List[Dict[str, Any]] = []
+    seen: Dict[str, Dict[str, Any]] = {}
+    duplicates = 0
+    next_source_row = 2
+    for imported in imports:
+        positions = {header: index for index, header in enumerate(imported.headers)}
+        for row in imported.raw_rows:
+            raw_rows.append([
+                row[positions[header]] if header in positions and positions[header] < len(row) else None
+                for header in headers
+            ])
+        warnings.extend(imported.warnings)
+        for original in imported.deals:
+            deal = dict(original)
+            deal["source_row"] = next_source_row
+            next_source_row += 1
+            key = _dedupe_key(deal)
+            if key in seen:
+                duplicates += 1
+                existing = seen[key]
+                for field_name, value in deal.items():
+                    if existing.get(field_name) in (None, "") and value not in (None, ""):
+                        existing[field_name] = value
+                continue
+            seen[key] = deal
+            deals.append(deal)
+    if duplicates:
+        warnings.append(f"Removed {duplicates} duplicate transaction(s) across automatic searches.")
+    return MergermarketImport(
+        headers=headers,
+        raw_rows=raw_rows,
+        deals=deals,
+        source_sheet=source_name,
         warnings=warnings,
     )

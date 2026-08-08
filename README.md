@@ -12,7 +12,7 @@ web research to produce a sourced company intelligence workbook.
 - Competitors, M&A precedents, and prospective buyers
 - Direct-source dossier for audit and follow-up research
 - Claim-level evidence register across all researched sections
-- Optional authorised Mergermarket export ingestion and relevance screening
+- Optional direct Mergermarket Deals screening with per-session credentials
 
 The research agents only collect structured evidence. Workbook calculations,
 source filtering, formatting, and export remain deterministic Python code.
@@ -26,6 +26,10 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+For local automatic Mergermarket retrieval, install Chrome/Chromium. If it is
+not in a standard location, set `MERGERMARKET_BROWSER_EXECUTABLE` to its binary.
+The deployed configuration installs Chromium through `packages.txt`.
 
 Configure secrets in `.streamlit/secrets.toml`:
 
@@ -55,19 +59,29 @@ The app offers two transaction-data paths:
 
 - **Public web research:** no Mergermarket access is required; the existing
   evidence-gated M&A workflow is used.
-- **Mergermarket export + public enrichment:** sign in to Mergermarket in your
-  own browser, export authorised Deals results as `.xlsx` or `.csv`, and upload
-  the file. The app does not receive or store your Mergermarket password.
+- **Connect Mergermarket automatically:** enter an authorised normal
+  email/password login when the app opens. A fresh headless browser signs in,
+  runs up to three agent-designed Deals searches, downloads the permitted
+  Current Layout exports, parses them in memory, and closes. No manual Excel
+  upload is required.
 
-The importer preserves the raw export, maps common column-name variants,
+Credentials are never configured in `.env`, Streamlit secrets, source code,
+logs, or generated workbooks. They exist only for the active Streamlit/browser
+session. The worker does not bypass MFA, CAPTCHA, concurrent-session rules,
+export allowances, or subscription controls. If Mergermarket cannot be used,
+select Public web research or leave both login fields blank for that run.
+
+The importer preserves the raw retrieved data, maps common column-name variants,
 deduplicates by Deal ID and transaction identity, and uses a specialist agent
 to classify Core, Broader, Adjacent, and Excluded candidates. The output adds
 `Final Comps`, `Adjacent`, `Excluded`, `Sources`, `Search Log`, and `QA` sheets.
 Calculated multiples remain formula-driven and are only produced from compatible
-source fields.
+source fields. Public-web M&A research still runs as a complementary coverage
+pass, so Mergermarket is a high-quality seed rather than the completeness limit.
 
-An official Mergermarket API or service-account integration can be added behind
-the same import boundary when licensed API documentation is available.
+The Mergermarket export dialog shows the account's remaining monthly allowance.
+The app defaults to 100 deals per search and lets the user choose 50, 100, or
+500. Keep the default unless the broader universe is genuinely needed.
 
 ## Model configuration
 
@@ -89,7 +103,7 @@ Run the offline test suite and syntax checks before deploying:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile app.py pipeline_core_v2.py research_agents.py
+python -m py_compile app.py pipeline_core_v2.py research_agents.py mergermarket_browser.py
 ```
 
 Live end-to-end validation additionally requires valid OpenAI and PrivateCircle
@@ -100,4 +114,6 @@ credentials and consumes API usage.
 Never commit API keys. Rotate any credential that has previously appeared in a
 source file, shell history, shared workbook, or deployment log. For a production
 multi-user deployment, replace the optional shared-password gate with your
-organization's SSO or identity-aware proxy.
+organization's SSO or identity-aware proxy. Deploy this application privately;
+each Mergermarket user must use an account whose licence permits automated
+screening/export in this manner.

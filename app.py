@@ -2,10 +2,11 @@ import hmac
 import logging
 import os
 import re
+from datetime import date
 
 import streamlit as st
 
-from mergermarket_import import parse_mergermarket_export
+from mergermarket_browser import MergermarketError
 from pipeline_core_v2 import generate_profile_excel_bytes, privatecircle_search_dropdown
 
 
@@ -101,45 +102,58 @@ if missing:
 
 st.subheader("Transaction data source")
 transaction_source = st.radio(
-    "Do you have an authorised Mergermarket export for this profile?",
-    options=["Public web research", "Mergermarket export + public enrichment"],
+    "Transaction research mode",
+    options=["Connect Mergermarket automatically", "Public web research"],
     horizontal=True,
-    help="The app never stores or receives your Mergermarket password.",
+    help="Automatic mode signs in for this run, exports screened Deals results, then closes its isolated browser session.",
 )
 transaction_scope = st.selectbox(
     "Transaction coverage",
     options=["Domestic and global", "Domestic only", "Global only"],
     index=0,
 )
-mergermarket_upload = None
-mergermarket_preview = None
-if transaction_source.startswith("Mergermarket"):
+mergermarket_email = ""
+mergermarket_password = ""
+transaction_end_date = date.today()
+try:
+    transaction_start_date = transaction_end_date.replace(year=transaction_end_date.year - 10)
+except ValueError:
+    transaction_start_date = transaction_end_date.replace(year=transaction_end_date.year - 10, day=28)
+mergermarket_max_deals = 100
+if transaction_source.startswith("Connect Mergermarket"):
     st.info(
-        "Sign in to Mergermarket in your own browser, export the filtered Deals results with the "
-        "richest available columns, and upload the authorised export here."
+        "Enter your authorised Mergermarket login for this run. The credentials are held only in "
+        "the active Streamlit session and are not written to disk or the workbook. The browser copy "
+        "is discarded when its isolated session closes. The worker does not bypass MFA, CAPTCHA, or subscription controls."
     )
-    mergermarket_upload = st.file_uploader(
-        "Mergermarket Deals export",
-        type=["xlsx", "csv"],
-        help="Include Deal ID, parties, announcement date, status, description, value, financials, and multiples where available.",
+    st.caption("Leave both fields blank to use the normal public-web transaction workflow without Mergermarket.")
+    mm_left, mm_right = st.columns(2)
+    with mm_left:
+        mergermarket_email = st.text_input(
+            "Mergermarket email",
+            placeholder="name@company.com",
+            autocomplete="username",
+        )
+    with mm_right:
+        mergermarket_password = st.text_input(
+            "Mergermarket password",
+            type="password",
+            autocomplete="current-password",
+        )
+    dates = st.date_input(
+        "Announcement-date period",
+        value=(transaction_start_date, transaction_end_date),
+        max_value=date.today(),
+        help="The search agent applies this period to the Mergermarket Deals screener.",
     )
-    if mergermarket_upload:
-        if mergermarket_upload.size > 25 * 1024 * 1024:
-            st.error("The Mergermarket export exceeds the 25 MB upload limit.")
-        else:
-            try:
-                mergermarket_preview = parse_mergermarket_export(
-                    mergermarket_upload.name,
-                    mergermarket_upload.getvalue(),
-                )
-                st.success(
-                    f"Loaded {len(mergermarket_preview.deals)} unique transaction candidates "
-                    f"from sheet '{mergermarket_preview.source_sheet}'."
-                )
-                for warning in mergermarket_preview.warnings:
-                    st.warning(warning)
-            except Exception as error:
-                st.error(f"The export could not be interpreted: {error}")
+    if isinstance(dates, (tuple, list)) and len(dates) == 2:
+        transaction_start_date, transaction_end_date = dates
+    mergermarket_max_deals = st.select_slider(
+        "Maximum deals exported per search",
+        options=[50, 100, 500],
+        value=100,
+        help="The agent runs up to three focused searches. Larger exports consume more of the account's Mergermarket export allowance.",
+    )
 
 st.subheader("1. Find the legal entity")
 with st.form("company_search_form"):
@@ -193,12 +207,16 @@ if results:
         "Generation can take several minutes because the app verifies sources and runs multiple "
         "specialist research stages."
     )
-    requires_valid_export = transaction_source.startswith("Mergermarket") and mergermarket_preview is None
+    has_mm_email = bool(mergermarket_email.strip())
+    has_mm_password = bool(mergermarket_password)
+    incomplete_credentials = transaction_source.startswith("Connect Mergermarket") and has_mm_email != has_mm_password
+    if incomplete_credentials:
+        st.warning("Enter both Mergermarket fields, or leave both blank to use public-web research.")
     generate = st.button(
         "Generate sourced profile",
         type="primary",
         use_container_width=True,
-        disabled=requires_valid_export,
+        disabled=incomplete_credentials,
     )
 
     if generate:
@@ -218,15 +236,22 @@ if results:
                     privatecircle_token=privatecircle_api_key,
                     progress_cb=progress_callback,
                     cin=selected.get("cin") or "",
-                    mergermarket_export_name=mergermarket_upload.name if mergermarket_preview else "",
-                    mergermarket_export_bytes=mergermarket_upload.getvalue() if mergermarket_preview else None,
                     transaction_scope=transaction_scope,
+                    mergermarket_email=mergermarket_email if has_mm_email and has_mm_password else "",
+                    mergermarket_password=mergermarket_password if has_mm_email and has_mm_password else "",
+                    transaction_start_date=transaction_start_date,
+                    transaction_end_date=transaction_end_date,
+                    mergermarket_max_deals_per_query=mergermarket_max_deals,
                 )
             st.session_state.generated_profile = {
                 "company_id": selected["id"],
                 "company_name": selected["name"],
                 "data": workbook,
             }
+        except MergermarketError as error:
+            logger.warning("Mergermarket workflow did not complete: %s", error)
+            st.error(str(error))
+            st.info("Switch Transaction research mode to Public web research to generate the profile without Mergermarket.")
         except Exception:
             logger.exception("Profile generation failed for company id %s", selected.get("id"))
             st.error(

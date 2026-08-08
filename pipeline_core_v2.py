@@ -10,6 +10,7 @@ import json
 import re
 import math
 from copy import copy
+from datetime import date
 from typing import Optional, Dict, Any, Tuple, List
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -21,6 +22,11 @@ from openpyxl.utils import get_column_letter
 from openai import OpenAI
 
 from mergermarket_import import MergermarketImport, parse_mergermarket_export
+from mergermarket_browser import (
+    MergermarketCredentials,
+    MergermarketSearchPlan,
+    fetch_mergermarket_transactions,
+)
 from research_agents import ResearchOrchestrator
 
 
@@ -929,6 +935,8 @@ def write_transaction_comps_workbook(
     imported: MergermarketImport,
     company_name: str,
     search_scope: str,
+    search_queries: Optional[List[str]] = None,
+    retrieval_mode: str = "Authorised Mergermarket export",
 ):
     raw = _fresh_sheet(wb, MM_RAW_SHEET)
     for column, header in enumerate(imported.headers, start=1):
@@ -987,11 +995,20 @@ def write_transaction_comps_workbook(
     search_log.append([
         time.strftime("%Y-%m-%d"),
         company_name,
-        f"Authorised Mergermarket export: {imported.source_sheet}",
+        f"{retrieval_mode}: {imported.source_sheet}",
         search_scope,
         f"{len(imported.deals)} unique candidate transactions imported",
         "Run public-source enrichment for missing values and financial denominators",
     ])
+    for query in search_queries or []:
+        search_log.append([
+            time.strftime("%Y-%m-%d"),
+            company_name,
+            "Automatic Mergermarket Deals search",
+            search_scope,
+            query,
+            "Public-web coverage pass retained for complementary transactions and source validation",
+        ])
     for warning in imported.warnings:
         search_log.append([time.strftime("%Y-%m-%d"), company_name, "Import QA", search_scope, warning, "Review source export layout if material"])
     _style_table(search_log, header_row=1, max_col=6)
@@ -2417,6 +2434,11 @@ def generate_profile_excel_bytes(
     mergermarket_export_name: str = "",
     mergermarket_export_bytes: Optional[bytes] = None,
     transaction_scope: str = "Domestic and global",
+    mergermarket_email: str = "",
+    mergermarket_password: str = "",
+    transaction_start_date: Optional[date] = None,
+    transaction_end_date: Optional[date] = None,
+    mergermarket_max_deals_per_query: int = 100,
 ) -> bytes:
     """
     Front-end contract unchanged:
@@ -2431,6 +2453,8 @@ def generate_profile_excel_bytes(
     cin = (cin or "").strip()
     mergermarket_export_name = (mergermarket_export_name or "").strip()
     transaction_scope = (transaction_scope or "Domestic and global").strip()
+    mergermarket_email = (mergermarket_email or "").strip()
+    mergermarket_password = mergermarket_password or ""
     
 
     if not company_name:
@@ -2520,17 +2544,68 @@ def generate_profile_excel_bytes(
         if isinstance(source, dict) and source.get("url")
     ]
 
-    has_mergermarket_export = bool(mergermarket_export_bytes and mergermarket_export_name)
-    if has_mergermarket_export:
+    has_uploaded_mergermarket_export = bool(mergermarket_export_bytes and mergermarket_export_name)
+    wants_automatic_mergermarket = bool(mergermarket_email and mergermarket_password)
+    has_mergermarket_data = False
+    if has_uploaded_mergermarket_export:
         cb("Importing and screening Mergermarket transactions...", 27)
         imported = parse_mergermarket_export(mergermarket_export_name, mergermarket_export_bytes)
+        search_queries: List[str] = []
+        retrieval_mode = "Authorised Mergermarket export"
+        has_mergermarket_data = True
+    elif wants_automatic_mergermarket:
+        cb("Signing in and screening Mergermarket Deals...", 27)
+        if orchestrator is None:
+            orchestrator = ResearchOrchestrator(openai_api_key, model=RESEARCH_MODEL)
+        try:
+            search_queries = orchestrator.build_mergermarket_search_plan(company_name, market_def)
+        except Exception:
+            search_queries = []
+        if not search_queries:
+            keyword_fallback = [
+                str(value).strip()
+                for value in market_def.get("keywords", [])
+                if str(value).strip()
+            ][:8]
+            market_label = str(market_def.get("primary_market") or company_name).strip()
+            search_queries = [f"Target companies in {market_label}: {', '.join(keyword_fallback)}"]
+        end_date = transaction_end_date or date.today()
+        try:
+            default_start = end_date.replace(year=end_date.year - 10)
+        except ValueError:
+            default_start = end_date.replace(year=end_date.year - 10, day=28)
+        start_date = transaction_start_date or default_start
+        browser_result = fetch_mergermarket_transactions(
+            MergermarketCredentials(email=mergermarket_email, password=mergermarket_password),
+            MergermarketSearchPlan(
+                queries=search_queries,
+                start_date=start_date,
+                end_date=end_date,
+                geography_scope=transaction_scope,
+                max_deals_per_query=max(50, min(500, int(mergermarket_max_deals_per_query))),
+            ),
+        )
+        imported = browser_result.imported
+        imported.warnings.extend(browser_result.warnings)
+        search_queries = browser_result.executed_queries
+        retrieval_mode = "Automatic authorised Mergermarket retrieval"
+        has_mergermarket_data = True
+
+    if has_mergermarket_data:
         try:
             if orchestrator is None:
                 orchestrator = ResearchOrchestrator(openai_api_key, model=RESEARCH_MODEL)
             orchestrator.classify_transactions(company_name, market_def, imported.deals)
         except Exception:
             imported.warnings.append("Automated relevance screening was unavailable; candidates require manual review.")
-        write_transaction_comps_workbook(wb, imported, company_name, transaction_scope)
+        write_transaction_comps_workbook(
+            wb,
+            imported,
+            company_name,
+            transaction_scope,
+            search_queries=search_queries,
+            retrieval_mode=retrieval_mode,
+        )
 
     cb("Filling main sheet...", 18)
 
@@ -2587,15 +2662,16 @@ def generate_profile_excel_bytes(
 
         # M&A sheet
         if key == "m&a landscape":
-            if has_mergermarket_export:
-                ws.cell(r, MAIN_COL_ANSWER).value = "See 'Final Comps', 'Adjacent', 'Excluded', and 'QA' sheets"
-                r += 1
-                continue
             cb("Researching M&A landscape (web search)...", 55)
             ma_json = ma_research_json(company_name, market_def, client=client, facts_cache=facts_cache)
             write_ma(ws_ma, ma_json)
             format_ma_sheet(ws_ma)
-            ws.cell(r, MAIN_COL_ANSWER).value = "See 'M&A Landscape' sheet"
+            if has_mergermarket_data:
+                ws.cell(r, MAIN_COL_ANSWER).value = (
+                    "See 'Final Comps', 'Adjacent', 'Excluded', 'QA', and complementary public-web 'M&A Landscape' sheets"
+                )
+            else:
+                ws.cell(r, MAIN_COL_ANSWER).value = "See 'M&A Landscape' sheet"
             time.sleep(SLEEP_BETWEEN_CALLS_SEC)
             r += 1
             continue

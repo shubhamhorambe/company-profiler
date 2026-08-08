@@ -320,6 +320,54 @@ Rules:
         )
         return {"dossier": dossier, "credit_reports": reports}
 
+    def build_mergermarket_search_plan(
+        self,
+        company_name: str,
+        market_definition: Dict[str, Any],
+    ) -> List[str]:
+        """Create a compact set of Deals-screener queries without credentials."""
+        payload = self._plain_json(
+            f"""
+You are designing searches for Mergermarket's Deals screener.
+
+Subject company: {company_name}
+Primary market: {market_definition.get("primary_market") or "Not established"}
+Market description: {market_definition.get("market_description") or "Not established"}
+Search keywords: {json.dumps(market_definition.get("keywords") or [], ensure_ascii=False)}
+Excluded umbrella markets: {json.dumps(market_definition.get("exclude_markets") or [], ensure_ascii=False)}
+
+Return ONLY JSON:
+{{
+  "queries": [
+    "precise target-company description query for direct/core transactions",
+    "broader product and customer-overlap query",
+    "adjacent capability or value-chain query"
+  ]
+}}
+
+Rules:
+- Return 2 or 3 concise natural-language queries suitable for the Deals search box.
+- Search target business descriptions, not the subject company name.
+- Include distinctive products, technology, buyer use cases, or value-chain terms.
+- Do not include dates or geography; the browser worker adds those deterministically.
+- Do not include generic phrases such as industrial company, services company, or technology.
+- Keep each query below 240 characters.
+""".strip(),
+            max_output_tokens=1200,
+        )
+        raw_queries = payload.get("queries", [])
+        if not isinstance(raw_queries, list):
+            return []
+        queries: List[str] = []
+        seen = set()
+        for value in raw_queries:
+            query = " ".join(str(value or "").split())[:240]
+            key = query.lower()
+            if len(query) >= 8 and key not in seen:
+                seen.add(key)
+                queries.append(query)
+        return queries[:3]
+
     def classify_transactions(
         self,
         company_name: str,

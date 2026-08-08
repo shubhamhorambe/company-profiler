@@ -16,6 +16,21 @@ class _ScreeningOrchestrator(ResearchOrchestrator):
         }
 
 
+class _PlanningOrchestrator(ResearchOrchestrator):
+    def __init__(self):
+        pass
+
+    def _plain_json(self, prompt: str, max_output_tokens: int = 3000):
+        return {
+            "queries": [
+                "industrial safety equipment manufacturers",
+                "industrial safety equipment manufacturers",
+                "fall protection and personal protective equipment",
+                "this fourth query must be ignored",
+            ]
+        }
+
+
 class ResearchAgentCleaningTests(unittest.TestCase):
     def test_normalize_url_rejects_unsafe_schemes_and_local_hosts(self):
         self.assertEqual(normalize_url("javascript:alert(1)"), "")
@@ -66,6 +81,14 @@ class ResearchAgentCleaningTests(unittest.TestCase):
         self.assertEqual(result[0]["relevance_tier"], "Core")
         self.assertEqual(result[0]["target"], "Alpha Safety")
         self.assertEqual(result[1]["relevance_tier"], "Excluded")
+
+    def test_mergermarket_search_plan_is_bounded_and_deduplicated(self):
+        queries = _PlanningOrchestrator().build_mergermarket_search_plan(
+            "Subject Co",
+            {"primary_market": "Industrial safety", "keywords": ["PPE", "fall protection"]},
+        )
+        self.assertEqual(len(queries), 3)
+        self.assertIn("fall protection", queries[1])
 
 
 if __name__ == "__main__":
